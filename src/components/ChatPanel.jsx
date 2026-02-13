@@ -1,10 +1,14 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle } from 'lucide-react';
+import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
 
 const API_BASE = `${window.location.pathname.replace(/\/+$/, '')}/api`;
+
+// Detect system 12h/24h preference: toLocaleTimeString() without options respects OS settings,
+// so we format a 3 PM test time and check for AM/PM markers to detect the system preference.
+const _systemUses12h = /[AP]M|[ap]m|오[전후]/.test(new Date(2000, 0, 1, 15, 0, 0).toLocaleTimeString());
 
 const SESSION_KEY = 'ai-chat-messages';
 
@@ -36,7 +40,7 @@ const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
   const isError = msg.role === 'error';
 
   return (
-    <div className={`flex flex-col gap-1 ${isUser ? 'items-end' : 'items-start'}`}>
+    <div className={`flex flex-col gap-1 min-w-0 max-w-full ${isUser ? 'items-end' : 'items-start'}`}>
       <div className="flex items-center gap-1.5">
         {!isUser && (
           isError
@@ -44,19 +48,19 @@ const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
             : <Ghost size={12} className="text-blue-400" />
         )}
         <span className={`text-[10px] font-medium ${isUser ? 'text-blue-400' : isError ? 'text-red-400' : 'text-neutral-500'}`}>
-          {isUser ? 'You' : isError ? 'Error' : 'AI'}
+          {isUser ? 'You' : isError ? 'Error' : 'GhostWriter'}
         </span>
         <span className="text-[10px] text-neutral-700">
-          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          {new Date(msg.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: _systemUses12h })}
         </span>
       </div>
       <div
-        className={`text-sm px-3 py-2 rounded-lg max-w-[85%] break-words ${
+        className={`text-sm px-3 py-2 rounded-lg break-words ${
           isUser
-            ? 'bg-[#1e3a5f] text-blue-100 border border-blue-500/20'
+            ? 'max-w-[85%] bg-[#1e3a5f] text-blue-100 border border-blue-500/20'
             : isError
-              ? 'bg-red-500/10 text-red-300 border border-red-500/20'
-              : 'bg-[#1a1a1a] text-neutral-300 border border-[#262626]'
+              ? 'max-w-[85%] bg-red-500/10 text-red-300 border border-red-500/20'
+              : 'max-w-full overflow-hidden bg-[#1a1a1a] text-neutral-300 border border-[#262626]'
         }`}
       >
         {isUser || isError ? (
@@ -66,8 +70,8 @@ const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
             <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
               {msg.content || ''}
             </ReactMarkdown>
-            {isStreaming && (
-              <span className="inline-block w-1.5 h-4 bg-blue-400 ml-0.5 animate-pulse rounded-sm align-text-bottom" />
+            {isStreaming && msg.content && (
+              <span className="inline-block w-[2px] h-[1em] bg-blue-400/70 ml-0.5 animate-pulse align-text-bottom" />
             )}
           </div>
         )}
@@ -76,23 +80,62 @@ const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
   );
 });
 
-export default function ChatPanel({ fullWidth = false }) {
+export default function ChatPanel({ fullWidth = false, currentDoc = null, documentContent = '' }) {
   const [messages, setMessages] = useState(loadSessionMessages);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [waiting, setWaiting] = useState(false); // true between send and first token
   const [backendName] = useState('Kiro');
   const [backendStatus, setBackendStatus] = useState('unknown'); // 'connected' | 'error' | 'unknown'
+  const [editMode, setEditMode] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [panelWidth, setPanelWidth] = useState(320);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const isResizing = useRef(false);
   const abortRef = useRef(null);
+  const confirmTimerRef = useRef(null);
 
   // Persist messages to sessionStorage
   useEffect(() => {
     saveSessionMessages(messages);
   }, [messages]);
+
+  // Sync edit mode to server
+  useEffect(() => {
+    fetch(`${API_BASE}/edit-mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: editMode }),
+    }).catch(() => {});
+  }, [editMode]);
+
+  // Auto-dismiss clear confirmation after 3 seconds
+  useEffect(() => {
+    if (confirmClear) {
+      confirmTimerRef.current = setTimeout(() => setConfirmClear(false), 3000);
+      return () => clearTimeout(confirmTimerRef.current);
+    }
+  }, [confirmClear]);
+
+  // Listen for edit-reverted SSE events
+  useEffect(() => {
+    const es = new EventSource(`${API_BASE}/events`);
+    es.addEventListener('edit-reverted', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        // Add a system notification to the chat
+        const revertMsg = {
+          id: nextId(),
+          role: 'error',
+          content: data.message || 'Edit reverted — Read-Only mode is active.',
+          timestamp: new Date().toISOString(),
+        };
+        setMessages(prev => [...prev, revertMsg]);
+      } catch {}
+    });
+    return () => es.close();
+  }, []);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -140,10 +183,8 @@ export default function ChatPanel({ fullWidth = false }) {
     document.addEventListener('mouseup', handleMouseUp);
   }, [panelWidth]);
 
-  // Send message with streaming
-  async function sendMessage(e) {
-    e.preventDefault();
-    const text = input.trim();
+  // Core send logic — accepts text directly so it can be called programmatically
+  async function doSend(text, overrideEditMode) {
     if (!text || streaming) return;
 
     const userMsg = { id: nextId(), role: 'user', content: text, timestamp: new Date().toISOString() };
@@ -154,6 +195,9 @@ export default function ChatPanel({ fullWidth = false }) {
     setStreaming(true);
     setWaiting(true);
 
+    // Use override if provided (for toggle auto-send before state updates)
+    const effectiveEditMode = overrideEditMode !== undefined ? overrideEditMode : editMode;
+
     // Build history from previous messages (exclude the new ones)
     const history = messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -163,10 +207,23 @@ export default function ChatPanel({ fullWidth = false }) {
     abortRef.current = controller;
 
     try {
+      // Build context from current document
+      const context = { editMode: effectiveEditMode };
+      if (currentDoc) {
+        context.documentTitle = currentDoc.title || currentDoc.id;
+        context.documentId = currentDoc.id;
+        if (documentContent) {
+          // Send first ~2000 chars as excerpt to keep token usage reasonable
+          context.documentExcerpt = documentContent.length > 2000
+            ? documentContent.slice(0, 2000) + '\n...(truncated)'
+            : documentContent;
+        }
+      }
+
       const res = await fetch(`${API_BASE}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history }),
+        body: JSON.stringify({ message: text, history, context }),
         signal: controller.signal,
       });
 
@@ -197,7 +254,7 @@ export default function ChatPanel({ fullWidth = false }) {
           try {
             const parsed = JSON.parse(data);
             if (parsed.type === 'token' && parsed.text) {
-              if (waiting) setWaiting(false);
+              if (waiting) { setWaiting(false); setBackendStatus('connected'); }
               accumulated += parsed.text;
               const content = accumulated;
               setMessages(prev =>
@@ -205,6 +262,7 @@ export default function ChatPanel({ fullWidth = false }) {
               );
             } else if (parsed.type === 'error') {
               gotError = true;
+              setBackendStatus('error');
               setMessages(prev =>
                 prev.map(m => m.id === assistantMsg.id
                   ? { ...m, role: 'error', content: parsed.text }
@@ -255,6 +313,12 @@ export default function ChatPanel({ fullWidth = false }) {
     }
   }
 
+  // Form submit handler
+  function sendMessage(e) {
+    e.preventDefault();
+    doSend(input.trim());
+  }
+
   function handleStop() {
     if (abortRef.current) {
       abortRef.current.abort();
@@ -292,7 +356,7 @@ export default function ChatPanel({ fullWidth = false }) {
 
   return (
     <div
-      className={`border-l border-[#262626] flex flex-col bg-[#0a0a0a] relative ${fullWidth ? 'w-full' : 'shrink-0'}`}
+      className={`border-l border-[#262626] flex flex-col bg-[#0a0a0a] relative overflow-hidden ${fullWidth ? 'w-full' : 'shrink-0'}`}
       style={fullWidth ? undefined : { width: panelWidth }}
     >
       {/* Resize handle */}
@@ -313,30 +377,27 @@ export default function ChatPanel({ fullWidth = false }) {
           <span className="text-xs font-medium text-neutral-400">👻 GhostWriter</span>
           {backendName && (
             <span className="flex items-center gap-1" title={
-              backendStatus === 'connected' ? 'Connected' :
-              backendStatus === 'error' ? 'Connection failed — check Settings' :
-              'Checking connection...'
+              backendStatus === 'connected' ? `${backendName} is connected` :
+              backendStatus === 'error' ? `${backendName} disconnected — check Settings` :
+              `Connecting to ${backendName}...`
             }>
               <Circle size={6} className={
                 backendStatus === 'connected' ? 'text-green-500 fill-green-500' :
                 backendStatus === 'error' ? 'text-red-500 fill-red-500' :
                 'text-yellow-500 fill-yellow-500 animate-pulse'
               } />
-              <span className="text-[10px] text-neutral-600">{backendName}</span>
+              <span className={`text-[10px] ${backendStatus === 'error' ? 'text-red-400' : 'text-neutral-600'}`}>
+                {backendStatus === 'connected' ? `${backendName} connected` :
+                 backendStatus === 'error' ? `${backendName} disconnected` :
+                 'Connecting...'}
+              </span>
             </span>
           )}
         </div>
-        <button
-          onClick={handleNewChat}
-          className="p-1.5 rounded hover:bg-[#1a1a1a] text-neutral-600 hover:text-neutral-400 transition-colors"
-          title="New Chat"
-        >
-          <Eraser size={14} />
-        </button>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-w-0">
         {messages.length === 0 && (
           <div className="text-center text-neutral-600 text-xs mt-8">
             <Ghost size={24} className="mx-auto mb-2 text-neutral-700" />
@@ -356,6 +417,9 @@ export default function ChatPanel({ fullWidth = false }) {
 
           const isStreamingThis = streaming && msg.role === 'assistant' && msg.id === messages[messages.length - 1]?.id;
 
+          // Hide empty assistant bubble while waiting for first token
+          if (isStreamingThis && !msg.content && waiting) return null;
+
           return (
             <div key={msg.id}>
               {showDateSep && (
@@ -373,7 +437,7 @@ export default function ChatPanel({ fullWidth = false }) {
           <div className="flex flex-col gap-1 items-start">
             <div className="flex items-center gap-1.5">
               <Ghost size={12} className="text-blue-400" />
-              <span className="text-[10px] font-medium text-neutral-500">AI</span>
+              <span className="text-[10px] font-medium text-neutral-500">GhostWriter</span>
             </div>
             <div className="bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 flex items-center gap-1.5">
               <span className="text-sm text-neutral-500">Thinking</span>
@@ -389,35 +453,112 @@ export default function ChatPanel({ fullWidth = false }) {
       </div>
 
       {/* Input */}
-      <form onSubmit={sendMessage} className="p-3 border-t border-[#1a1a1a]">
-        <div className="flex gap-2">
+      <form onSubmit={sendMessage} className="p-3 border-t border-[#1a1a1a] space-y-2">
+        {/* Clear confirmation bar */}
+        {confirmClear && (
+          <div className="flex items-center justify-between bg-red-900/30 border border-red-500/30 rounded-lg px-3 py-2">
+            <span className="text-xs text-red-300">Clear chat history?</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmClear(false)}
+                className="text-[11px] text-neutral-400 hover:text-neutral-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handleNewChat();
+                  setConfirmClear(false);
+                }}
+                className="text-[11px] bg-red-600 hover:bg-red-500 text-white px-2.5 py-1 rounded transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="flex gap-2 items-end">
           <textarea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // Auto-grow: reset then expand to scrollHeight
+              e.target.style.height = 'auto';
+              e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+            }}
             onKeyDown={handleKeyDown}
             placeholder="Ask GhostWriter..."
-            rows={1}
-            className="flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-none max-h-28 overflow-y-auto"
+            rows={3}
+            className="flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-y max-h-[200px] overflow-y-auto"
           />
-          {streaming ? (
+          <div className="flex flex-col gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={handleStop}
-              className="p-2 rounded-lg bg-red-600 hover:bg-red-500 transition-colors shrink-0"
-              title="Stop generating"
+              onClick={() => setConfirmClear(true)}
+              className="p-2 rounded-lg bg-red-900/60 hover:bg-red-800/80 transition-colors"
+              title="Clear chat"
             >
-              <Square size={14} className="text-white" />
+              <Eraser size={14} className="text-red-300" />
             </button>
-          ) : (
-            <button
-              type="submit"
-              disabled={!input.trim()}
-              className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-            >
-              <Send size={14} className="text-white" />
-            </button>
-          )}
+            {streaming ? (
+              <button
+                type="button"
+                onClick={handleStop}
+                className="p-2 rounded-lg bg-red-600 hover:bg-red-500 transition-colors"
+                title="Stop generating"
+              >
+                <Square size={14} className="text-white" />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim()}
+                className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <Send size={14} className="text-white" />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className={`text-[11px] transition-colors duration-200 ${editMode ? 'text-amber-400/70' : 'text-neutral-600'}`}>
+            {editMode ? '👻✏️ Edit mode' : '👻🔍 Read mode'}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setEditMode(prev => {
+                const newMode = !prev;
+                // Auto-send only when enabling edit mode with an existing conversation
+                // Delay to let the Kiro backend settle between requests
+                if (newMode && messages.length > 0 && !streaming) {
+                  setTimeout(() => doSend('AI Edit mode enabled. Please proceed with the changes.', true), 2000);
+                }
+                return newMode;
+              });
+            }}
+            className={`relative flex items-center h-6 rounded-full text-[10px] font-medium transition-colors cursor-pointer ${
+              editMode
+                ? 'bg-amber-500/20 text-amber-300'
+                : 'bg-[#1a1a1a] text-neutral-500'
+            }`}
+            style={{ width: 108 }}
+          >
+            <span className={`absolute left-0 top-0 h-6 rounded-full transition-all duration-200 ${
+              editMode
+                ? 'translate-x-[52px] w-[56px] bg-amber-500/30'
+                : 'translate-x-0 w-[56px] bg-[#333]'
+            }`} />
+            <span className={`relative z-10 w-[56px] text-center transition-colors ${!editMode ? 'text-neutral-300' : 'text-neutral-600'}`}>
+              Read
+            </span>
+            <span className={`relative z-10 w-[56px] text-center transition-colors ${editMode ? 'text-amber-200' : 'text-neutral-600'}`}>
+              AI Edit
+            </span>
+          </button>
         </div>
       </form>
     </div>

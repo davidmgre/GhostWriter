@@ -288,6 +288,59 @@ function App() {
     }
   }, [documents]);
 
+  // Open folder or file via native macOS picker
+  async function openFolder() {
+    try {
+      const res = await fetch(`${API_BASE}/pick-folder`, { method: 'POST' });
+      const data = await res.json();
+      if (data.cancelled || !data.path) return;
+
+      // Save the new docsDir (parent dir if a file was picked)
+      await fetch(`${API_BASE}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ docsDir: data.path }),
+      });
+
+      // Reset current doc and reload
+      setCurrentDoc(null);
+      setContent('');
+      const docs = await loadDocuments();
+
+      // If a file was picked, auto-select it
+      if (data.isFile && data.filename) {
+        const fileId = `file:${data.filename}`;
+        const found = docs.find(d => d.id === fileId);
+        if (found) selectDoc(found.id);
+      }
+    } catch (err) {
+      console.error('Failed to open folder:', err);
+    }
+  }
+
+  // Rename document
+  async function renameDoc(id, newName) {
+    try {
+      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newName }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        console.error('Rename failed:', data.error);
+        return;
+      }
+      // Reload documents and re-select if the renamed doc was current
+      const docs = await loadDocuments();
+      if (currentDoc?.id === id && data.newId) {
+        selectDoc(data.newId);
+      }
+    } catch (err) {
+      console.error('Failed to rename document:', err);
+    }
+  }
+
   // Create new document
   async function createDoc(slug) {
     try {
@@ -519,6 +572,8 @@ ${previewEl.innerHTML}
                   currentDoc={currentDoc}
                   onSelect={(id) => { selectDoc(id); setMobileTab('preview'); }}
                   onCreate={createDoc}
+                  onOpenFolder={openFolder}
+                  onRename={renameDoc}
                 />
               </div>
             )}
@@ -534,7 +589,7 @@ ${previewEl.innerHTML}
             )}
             {mobileTab === 'chat' && (
               <div className="h-full">
-                <ChatPanel fullWidth />
+                <ChatPanel fullWidth currentDoc={currentDoc} documentContent={content} />
               </div>
             )}
           </div>
@@ -570,6 +625,8 @@ ${previewEl.innerHTML}
               currentDoc={currentDoc}
               onSelect={selectDoc}
               onCreate={createDoc}
+              onOpenFolder={openFolder}
+              onRename={renameDoc}
             />
           )}
 
@@ -598,7 +655,7 @@ ${previewEl.innerHTML}
             />
           )}
 
-          {chatOpen && <ChatPanel />}
+          {chatOpen && <ChatPanel currentDoc={currentDoc} documentContent={content} />}
         </div>
       )}
     </div>

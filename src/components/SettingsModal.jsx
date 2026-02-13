@@ -122,18 +122,30 @@ export default function SettingsModal({ onClose }) {
               <FolderOpen size={12} className="inline mr-1.5" />
               Documents Directory
             </label>
-            <input
-              type="text"
-              value={docsDir}
-              onChange={(e) => setDocsDir(e.target.value)}
-              placeholder="./documents"
-              className="w-full bg-[#0a0a0a] border border-[#333] rounded-lg px-3 py-2.5 text-sm text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-blue-500/50 transition-colors font-mono"
-            />
-            {resolvedDir && (
-              <p className="mt-1.5 text-[11px] text-neutral-600 font-mono truncate">
-                &rarr; {resolvedDir}
-              </p>
-            )}
+            <div className="flex items-center gap-2">
+              <div className="flex-1 bg-[#0a0a0a] border border-[#333] rounded-lg px-3 py-2.5 text-sm text-neutral-200 font-mono truncate min-h-[38px]">
+                {resolvedDir || docsDir || './documents'}
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`${API_BASE}/pick-folder`, { method: 'POST' });
+                    const data = await res.json();
+                    if (!data.cancelled && data.path) {
+                      setDocsDir(data.path);
+                      setResolvedDir(data.path);
+                    }
+                  } catch {
+                    setError('Failed to open folder picker');
+                  }
+                }}
+                className="shrink-0 flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium bg-[#1a1a1a] border border-[#333] hover:border-[#404040] text-neutral-300 rounded-lg transition-colors"
+              >
+                <FolderOpen size={13} />
+                Browse
+              </button>
+            </div>
           </div>
 
           {/* Divider */}
@@ -158,9 +170,9 @@ export default function SettingsModal({ onClose }) {
               />
             </div>
 
-            {/* System prompt */}
+            {/* Custom instructions */}
             <div className="mb-3">
-              <label className="block text-[11px] text-neutral-500 mb-1">System Prompt</label>
+              <label className="block text-[11px] text-neutral-500 mb-1">Custom Instructions (optional)</label>
               <textarea
                 value={aiSettings.ai_system_prompt || ''}
                 onChange={(e) => updateAi('ai_system_prompt', e.target.value)}

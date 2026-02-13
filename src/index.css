@@ -155,6 +155,12 @@ body {
 }
 
 /* Chat markdown (compact, inline with message bubbles) */
+.chat-markdown {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  overflow-x: hidden;
+}
 .chat-markdown p {
   margin: 0.25em 0;
 }
@@ -178,8 +184,11 @@ body {
   border-radius: 6px;
   padding: 0.6em 0.8em;
   overflow-x: auto;
+  max-width: 100%;
   margin: 0.4em 0;
   font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 .chat-markdown pre code {
   background: none;
@@ -204,6 +213,12 @@ body {
   margin: 0.3em 0;
   padding-left: 1.3em;
 }
+.chat-markdown ul {
+  list-style-type: disc;
+}
+.chat-markdown ol {
+  list-style-type: decimal;
+}
 .chat-markdown li {
   margin: 0.15em 0;
 }
@@ -212,6 +227,8 @@ body {
   margin: 0.3em 0;
   padding: 0.2em 0.6em;
   color: #a3a3a3;
+  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 .chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
   font-weight: 600;
@@ -230,6 +247,9 @@ body {
   border-collapse: collapse;
   font-size: 0.9em;
   margin: 0.3em 0;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
 }
 .chat-markdown th, .chat-markdown td {
   border: 1px solid #333;

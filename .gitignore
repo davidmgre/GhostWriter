@@ -6,3 +6,4 @@ documents/
 chat-messages.json
 chat-notifications.json
 settings.json
+.acp-session.json

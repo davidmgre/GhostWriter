@@ -317,14 +317,14 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               );
             } else if (parsed.type === 'tool_call') {
               if (waiting) { setWaiting(false); setBackendStatus('connected'); }
-              setToolCalls(prev => [...prev, { title: parsed.title, status: 'running' }]);
+              setToolCalls(prev => [...prev, { id: parsed.id, title: parsed.title, kind: parsed.kind, status: 'running' }]);
             } else if (parsed.type === 'tool_call_update') {
-              setToolCalls(prev => prev.map((tc, i) =>
-                i === prev.length - 1 ? { ...tc, progress: parsed.progress } : tc
+              setToolCalls(prev => prev.map(tc =>
+                tc.id === parsed.id ? { ...tc, status: parsed.status || tc.status, locations: parsed.locations } : tc
               ));
             } else if (parsed.type === 'tool_result') {
               setToolCalls(prev => prev.map(tc =>
-                tc.title === parsed.title ? { ...tc, status: 'done' } : tc
+                tc.id === parsed.id ? { ...tc, status: 'done' } : tc
               ));
             } else if (parsed.type === 'context_usage') {
               setContextUsage(parsed);
@@ -654,19 +654,19 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         {/* Tool call activity indicators */}
         {toolCalls.length > 0 && (
           <div className="flex flex-col gap-1 items-start">
-            {toolCalls.map((tc, i) => (
-              <div key={i} className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-1.5">
-                {tc.status === 'running' ? (
-                  <Loader2 size={12} className="text-amber-400 animate-spin" />
-                ) : (
+            {toolCalls.map((tc) => (
+              <div key={tc.id || tc.title} className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-1.5">
+                {tc.status === 'done' || tc.status === 'completed' ? (
                   <Check size={12} className="text-green-400" />
+                ) : (
+                  <Loader2 size={12} className="text-amber-400 animate-spin" />
                 )}
-                <span className={`text-[11px] ${tc.status === 'running' ? 'text-amber-300' : 'text-neutral-500'}`}>
+                {tc.kind && (
+                  <span className="text-[10px] text-neutral-600 font-mono">{tc.kind}</span>
+                )}
+                <span className={`text-[11px] ${tc.status === 'done' || tc.status === 'completed' ? 'text-neutral-500' : 'text-amber-300'}`}>
                   {tc.title}
                 </span>
-                {tc.progress && (
-                  <span className="text-[10px] text-neutral-600 ml-1">{tc.progress}</span>
-                )}
               </div>
             ))}
           </div>

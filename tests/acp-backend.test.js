@@ -160,11 +160,13 @@ describe('ACPBackend', () => {
       const promptMsg = getLastSentMessage(proc);
       expect(promptMsg.method).toBe('session/prompt');
 
-      // Simulate tool_call
+      // Simulate tool_call (Kiro sends fields at top level of update)
       sendNotification(proc, 'session/update', {
         update: {
           sessionUpdate: 'tool_call',
-          toolCall: { title: 'Read file', name: 'read_file', parameters: { path: '/test.md' } },
+          toolCallId: 'tc-123',
+          title: 'Editing test.md',
+          kind: 'edit',
         },
       });
 
@@ -172,14 +174,16 @@ describe('ACPBackend', () => {
       sendNotification(proc, 'session/update', {
         update: {
           sessionUpdate: 'tool_call_update',
-          toolCall: { title: 'Read file' },
-          content: { text: 'Reading 1024 bytes...' },
+          toolCallId: 'tc-123',
+          title: 'Editing test.md',
+          status: 'completed',
+          locations: [{ path: '/test.md', line: 1 }],
         },
       });
 
       // Simulate tool_result
       sendNotification(proc, 'session/update', {
-        update: { sessionUpdate: 'tool_result', toolCall: { title: 'Read file' } },
+        update: { sessionUpdate: 'tool_result', toolCallId: 'tc-123', title: 'Editing test.md' },
       });
 
       // Simulate text response
@@ -198,9 +202,11 @@ describe('ACPBackend', () => {
       expect(types).toContain('token');
       expect(types).toContain('done');
 
-      expect(chunks.find(c => c.type === 'tool_call').title).toBe('Read file');
+      expect(chunks.find(c => c.type === 'tool_call').title).toBe('Editing test.md');
+      expect(chunks.find(c => c.type === 'tool_call').kind).toBe('edit');
       expect(chunks.find(c => c.type === 'tool_call').status).toBe('running');
-      expect(chunks.find(c => c.type === 'tool_call_update').progress).toBe('Reading 1024 bytes...');
+      expect(chunks.find(c => c.type === 'tool_call_update').status).toBe('completed');
+      expect(chunks.find(c => c.type === 'tool_call_update').locations).toEqual([{ path: '/test.md', line: 1 }]);
       expect(chunks.find(c => c.type === 'tool_result').status).toBe('done');
     });
 

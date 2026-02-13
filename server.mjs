@@ -756,6 +756,20 @@ function registerApi(router) {
     }
   });
 
+  router.post('/ai/cancel', async (req, res) => {
+    try {
+      const backend = await getBackend(settings);
+      if (backend.cancel) {
+        await backend.cancel();
+        console.log('[AI Cancel] ✓ cancel sent');
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      console.error(`[AI Cancel] ✗ ${err.message}`);
+      res.json({ ok: false, error: err.message });
+    }
+  });
+
   router.post('/ai/reset', async (req, res) => {
     try {
       const backend = await getBackend(settings);
@@ -810,6 +824,47 @@ function registerApi(router) {
     }
   });
 
+  // --- Slash commands ---
+  router.get('/ai/commands', async (req, res) => {
+    try {
+      const backend = await getBackend(settings);
+      const commands = backend.getCommands ? await backend.getCommands() : [];
+      res.json({ commands });
+    } catch (err) {
+      console.error(`[AI Commands] ✗ ${err.message}`);
+      res.json({ commands: [] });
+    }
+  });
+
+  router.post('/ai/commands/execute', async (req, res) => {
+    try {
+      const { command } = req.body;
+      if (!command) return res.status(400).json({ error: 'command is required' });
+
+      const backend = await getBackend(settings);
+      if (!backend.executeCommand) {
+        return res.status(400).json({ error: 'Backend does not support commands' });
+      }
+      const result = await backend.executeCommand(command);
+      res.json({ ok: true, result });
+    } catch (err) {
+      console.error(`[AI Command] ✗ ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Context usage ---
+  router.get('/ai/context-usage', async (req, res) => {
+    try {
+      const backend = await getBackend(settings);
+      const usage = backend.getContextUsage ? backend.getContextUsage() : null;
+      const compacting = backend.isCompacting ? backend.isCompacting() : false;
+      res.json({ usage, compacting });
+    } catch (err) {
+      res.json({ usage: null, compacting: false });
+    }
+  });
+
   // --- Edit mode control ---
   router.post('/edit-mode', async (req, res) => {
     const { enabled } = req.body;
@@ -830,7 +885,7 @@ function registerApi(router) {
   });
 
   router.post('/ai/chat', async (req, res) => {
-    const { message, history = [], context } = req.body;
+    const { message, history = [], context, images = [] } = req.body;
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     console.log(`[AI Chat] backend=kiro message="${message.substring(0, 80)}"`);
@@ -889,9 +944,9 @@ function registerApi(router) {
       const maxHistory = parseInt(settings.ai_max_history || '20', 10);
       const messages = [...history.slice(-maxHistory), { role: 'user', content: message }];
 
-      // Stream
+      // Stream (pass image attachments if any)
       let chunkCount = 0;
-      for await (const chunk of backend.chatStream(messages, systemPrompt || undefined)) {
+      for await (const chunk of backend.chatStream(messages, systemPrompt || undefined, images.length > 0 ? images : undefined)) {
         chunkCount++;
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         if (chunk.type === 'done') {

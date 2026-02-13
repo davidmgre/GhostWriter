@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown } from 'lucide-react';
+import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -93,12 +93,19 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const [models, setModels] = useState([]);
   const [currentModel, setCurrentModel] = useState(null);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [toolCalls, setToolCalls] = useState([]); // active tool calls during streaming
+  const [contextUsage, setContextUsage] = useState(null); // { percentage } from backend
+  const [compacting, setCompacting] = useState(false);
+  const [slashCommands, setSlashCommands] = useState([]); // available slash commands
+  const [showSlashMenu, setShowSlashMenu] = useState(false);
+  const [images, setImages] = useState([]); // attached images as { data: base64, mimeType, name }
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const isResizing = useRef(false);
   const abortRef = useRef(null);
   const confirmTimerRef = useRef(null);
   const modelDropdownRef = useRef(null);
+  const slashMenuRef = useRef(null);
 
   // Persist messages to sessionStorage
   useEffect(() => {
@@ -167,6 +174,17 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       .then(data => {
         if (data.availableModels) setModels(data.availableModels);
         if (data.currentModelId) setCurrentModel(data.currentModelId);
+      })
+      .catch(() => {});
+  }, [backendStatus]);
+
+  // Fetch available slash commands after connection
+  useEffect(() => {
+    if (backendStatus !== 'connected') return;
+    fetch(`${API_BASE}/ai/commands`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.commands) setSlashCommands(data.commands);
       })
       .catch(() => {});
   }, [backendStatus]);
@@ -248,10 +266,19 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         }
       }
 
+      // Include attached images if any, then clear them
+      const attachedImages = images;
+      if (attachedImages.length > 0) setImages([]);
+
       const res = await fetch(`${API_BASE}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history, context }),
+        body: JSON.stringify({
+          message: text,
+          history,
+          context,
+          ...(attachedImages.length > 0 ? { images: attachedImages } : {}),
+        }),
         signal: controller.signal,
       });
 
@@ -288,6 +315,21 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               setMessages(prev =>
                 prev.map(m => m.id === assistantMsg.id ? { ...m, content } : m)
               );
+            } else if (parsed.type === 'tool_call') {
+              if (waiting) { setWaiting(false); setBackendStatus('connected'); }
+              setToolCalls(prev => [...prev, { title: parsed.title, status: 'running' }]);
+            } else if (parsed.type === 'tool_call_update') {
+              setToolCalls(prev => prev.map((tc, i) =>
+                i === prev.length - 1 ? { ...tc, progress: parsed.progress } : tc
+              ));
+            } else if (parsed.type === 'tool_result') {
+              setToolCalls(prev => prev.map(tc =>
+                tc.title === parsed.title ? { ...tc, status: 'done' } : tc
+              ));
+            } else if (parsed.type === 'context_usage') {
+              setContextUsage(parsed);
+            } else if (parsed.type === 'compaction') {
+              setCompacting(parsed.status === 'in_progress');
             } else if (parsed.type === 'error') {
               gotError = true;
               setBackendStatus('error');
@@ -336,18 +378,52 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     } finally {
       setStreaming(false);
       setWaiting(false);
+      setToolCalls([]);
       abortRef.current = null;
       inputRef.current?.focus();
+    }
+  }
+
+  // Execute a slash command via the backend
+  async function executeSlashCommand(command) {
+    const userMsg = { id: nextId(), role: 'user', content: command, timestamp: new Date().toISOString() };
+    setMessages(prev => [...prev, userMsg]);
+    setInput('');
+    setShowSlashMenu(false);
+
+    try {
+      const res = await fetch(`${API_BASE}/ai/commands/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setMessages(prev => [...prev, { id: nextId(), role: 'error', content: data.error, timestamp: new Date().toISOString() }]);
+      } else {
+        setMessages(prev => [...prev, { id: nextId(), role: 'assistant', content: `Command executed: ${command}`, timestamp: new Date().toISOString() }]);
+      }
+    } catch (err) {
+      setMessages(prev => [...prev, { id: nextId(), role: 'error', content: err.message, timestamp: new Date().toISOString() }]);
     }
   }
 
   // Form submit handler
   function sendMessage(e) {
     e.preventDefault();
-    doSend(input.trim());
+    const text = input.trim();
+    // Handle slash commands
+    if (text.startsWith('/') && slashCommands.some(c => text === `/${c.name}` || text.startsWith(`/${c.name} `))) {
+      executeSlashCommand(text);
+      return;
+    }
+    doSend(text);
   }
 
   function handleStop() {
+    // Tell Kiro to stop generating via ACP session/cancel
+    fetch(`${API_BASE}/ai/cancel`, { method: 'POST' }).catch(() => {});
+    // Also abort the HTTP fetch stream
     if (abortRef.current) {
       abortRef.current.abort();
     }
@@ -376,6 +452,49 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         if (!data.ok) setCurrentModel(currentModel); // revert on error
       })
       .catch(() => setCurrentModel(currentModel));
+  }
+
+  // Image handling helpers
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        // result is "data:<mime>;base64,<data>" — extract the base64 part
+        const base64 = reader.result.split(',')[1];
+        resolve({ data: base64, mimeType: file.type, name: file.name });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleImageFiles(files) {
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    const newImages = await Promise.all(imageFiles.map(fileToBase64));
+    setImages(prev => [...prev, ...newImages]);
+  }
+
+  function handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageItems = Array.from(items).filter(item => item.type.startsWith('image/'));
+    if (imageItems.length > 0) {
+      e.preventDefault();
+      const files = imageItems.map(item => item.getAsFile()).filter(Boolean);
+      handleImageFiles(files);
+    }
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    if (e.dataTransfer?.files) {
+      handleImageFiles(e.dataTransfer.files);
+    }
+  }
+
+  function removeImage(index) {
+    setImages(prev => prev.filter((_, i) => i !== index));
   }
 
   function handleKeyDown(e) {
@@ -472,6 +591,28 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           </div>
         )}
       </div>
+      {/* Context usage bar */}
+      {contextUsage && contextUsage.percentage != null && (
+        <div className="px-4 py-1 border-b border-[#262626] flex items-center gap-2">
+          <div className="flex-1 h-1.5 bg-[#1a1a1a] rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${
+                contextUsage.percentage >= 90 ? 'bg-red-500' :
+                contextUsage.percentage >= 50 ? 'bg-yellow-500' :
+                'bg-green-500'
+              }`}
+              style={{ width: `${Math.min(100, contextUsage.percentage)}%` }}
+            />
+          </div>
+          <span className={`text-[10px] font-mono ${
+            contextUsage.percentage >= 90 ? 'text-red-400' :
+            contextUsage.percentage >= 50 ? 'text-yellow-400' :
+            'text-green-400'
+          }`}>
+            {Math.round(contextUsage.percentage)}%
+          </span>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-w-0">
@@ -510,6 +651,33 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             </div>
           );
         })}
+        {/* Tool call activity indicators */}
+        {toolCalls.length > 0 && (
+          <div className="flex flex-col gap-1 items-start">
+            {toolCalls.map((tc, i) => (
+              <div key={i} className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-1.5">
+                {tc.status === 'running' ? (
+                  <Loader2 size={12} className="text-amber-400 animate-spin" />
+                ) : (
+                  <Check size={12} className="text-green-400" />
+                )}
+                <span className={`text-[11px] ${tc.status === 'running' ? 'text-amber-300' : 'text-neutral-500'}`}>
+                  {tc.title}
+                </span>
+                {tc.progress && (
+                  <span className="text-[10px] text-neutral-600 ml-1">{tc.progress}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Compaction indicator */}
+        {compacting && (
+          <div className="flex items-center gap-1.5 bg-[#1a1a1a] border border-amber-500/20 rounded-lg px-3 py-1.5">
+            <Loader2 size={12} className="text-amber-400 animate-spin" />
+            <span className="text-[11px] text-amber-300">Compacting context...</span>
+          </div>
+        )}
         {waiting && (
           <div className="flex flex-col gap-1 items-start">
             <div className="flex items-center gap-1.5">
@@ -556,18 +724,70 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             </div>
           </div>
         )}
+        {/* Attached image previews */}
+        {images.length > 0 && (
+          <div className="flex gap-2 flex-wrap px-1">
+            {images.map((img, i) => (
+              <div key={i} className="relative group">
+                <img
+                  src={`data:${img.mimeType};base64,${img.data}`}
+                  alt={img.name || 'attached'}
+                  className="h-12 w-12 rounded border border-[#262626] object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeImage(i)}
+                  className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-600 text-white text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Slash command autocomplete */}
+        {showSlashMenu && (
+          <div ref={slashMenuRef} className="bg-[#141414] border border-[#262626] rounded-lg shadow-xl py-1 max-h-[160px] overflow-y-auto">
+            {slashCommands
+              .filter(c => input.length <= 1 || `/${c.name}`.startsWith(input))
+              .map(c => (
+                <button
+                  key={c.name}
+                  type="button"
+                  onClick={() => {
+                    setInput(`/${c.name} `);
+                    setShowSlashMenu(false);
+                    inputRef.current?.focus();
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#1a1a1a] transition-colors flex items-center gap-2"
+                >
+                  <Slash size={12} className="text-blue-400 shrink-0" />
+                  <span className="text-[11px] text-neutral-300 font-mono">/{c.name}</span>
+                  {c.description && (
+                    <span className="text-[10px] text-neutral-600 truncate">{c.description}</span>
+                  )}
+                </button>
+              ))}
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => {
-              setInput(e.target.value);
+              const val = e.target.value;
+              setInput(val);
+              // Show slash command menu when input starts with /
+              setShowSlashMenu(val.startsWith('/') && !val.includes(' ') && slashCommands.length > 0);
               // Auto-grow: reset then expand to scrollHeight
               e.target.style.height = 'auto';
               e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Ask GhostWriter..."
+            onPaste={handlePaste}
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
+            placeholder={images.length > 0 ? 'Describe what to do with the image...' : 'Ask GhostWriter...'}
             rows={3}
             className="flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-y max-h-[200px] overflow-y-auto"
           />

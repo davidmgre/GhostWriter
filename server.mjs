@@ -303,6 +303,11 @@ function registerApi(router) {
 
   // --- File/folder picker (macOS native dialog via osascript + JXA) ---
   router.post('/pick-folder', (req, res) => {
+    // Only attempt native picker on macOS
+    if (process.platform !== 'darwin') {
+      return res.json({ unsupported: true });
+    }
+
     const defaultPath = getDocsDir().replace(/'/g, "\\'");
     const script = `
       ObjC.import('Cocoa');
@@ -325,6 +330,10 @@ function registerApi(router) {
       }`;
     execFile('osascript', ['-l', 'JavaScript', '-e', script], { timeout: 120000 }, (err, stdout) => {
       if (err) {
+        // If osascript fails (e.g. no GUI session on remote), signal unsupported
+        if (err.killed || err.signal || err.code === 127 || /execution error|not allowed/i.test(err.message)) {
+          return res.json({ unsupported: true });
+        }
         return res.json({ cancelled: true });
       }
       const picked = stdout.trim();
@@ -344,6 +353,52 @@ function registerApi(router) {
         res.json({ cancelled: true, error: e.message });
       }
     });
+  });
+
+  // --- Server-side directory browser (remote-compatible fallback) ---
+  router.post('/browse-dir', (req, res) => {
+    try {
+      const requestedPath = req.body.path || getDocsDir() || process.env.HOME || '/';
+      const resolved = path.resolve(requestedPath);
+
+      if (!fs.existsSync(resolved)) {
+        return res.status(400).json({ error: 'Path does not exist' });
+      }
+
+      const stat = fs.statSync(resolved);
+      if (!stat.isDirectory()) {
+        return res.status(400).json({ error: 'Path is not a directory' });
+      }
+
+      const parentDir = path.dirname(resolved);
+      const rawEntries = fs.readdirSync(resolved, { withFileTypes: true });
+
+      const entries = [];
+      for (const entry of rawEntries) {
+        // Skip hidden files/directories
+        if (entry.name.startsWith('.')) continue;
+
+        if (entry.isDirectory()) {
+          entries.push({ name: entry.name, type: 'dir' });
+        } else if (entry.isFile() && /\.(md|markdown)$/i.test(entry.name)) {
+          entries.push({ name: entry.name, type: 'file' });
+        }
+      }
+
+      // Sort: directories first, then files, alphabetically within each group
+      entries.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      res.json({
+        current: resolved,
+        parent: resolved !== parentDir ? parentDir : null,
+        entries,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // --- SSE endpoint ---
@@ -714,6 +769,44 @@ function registerApi(router) {
     } catch (err) {
       console.error(`[AI Reset] ✗ ${err.message}`);
       res.json({ ok: false, error: err.message });
+    }
+  });
+
+  // --- AI Model selection ---
+  router.get('/ai/models', async (req, res) => {
+    try {
+      const backend = await getBackend(settings);
+      if (backend.getModels) {
+        const models = backend.getModels();
+        if (models) {
+          return res.json(models);
+        }
+        // No session yet — trigger one so models get cached
+        await backend._ensureSession();
+        const fresh = backend.getModels();
+        return res.json(fresh || { currentModelId: null, availableModels: [] });
+      }
+      res.json({ currentModelId: null, availableModels: [] });
+    } catch (err) {
+      console.error(`[AI Models] ✗ ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/ai/model', async (req, res) => {
+    try {
+      const { modelId } = req.body;
+      if (!modelId) return res.status(400).json({ error: 'modelId is required' });
+
+      const backend = await getBackend(settings);
+      if (!backend.setModel) {
+        return res.status(400).json({ error: 'Backend does not support model switching' });
+      }
+      await backend.setModel(modelId);
+      res.json({ ok: true, modelId });
+    } catch (err) {
+      console.error(`[AI Model] ✗ ${err.message}`);
+      res.status(500).json({ error: err.message });
     }
   });
 

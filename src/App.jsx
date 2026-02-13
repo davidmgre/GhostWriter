@@ -6,6 +6,7 @@ import Header from './components/Header';
 import DocSidebar from './components/DocSidebar';
 import VersionHistory from './components/VersionHistory';
 import SettingsModal from './components/SettingsModal';
+import FileBrowser from './components/FileBrowser';
 import { MessageSquare, FileText, Eye, List } from 'lucide-react';
 
 const API_BASE = `${window.location.pathname.replace(/\/+$/, '')}/api`;
@@ -119,6 +120,7 @@ function App() {
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [fileBrowserOpen, setFileBrowserOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const autoSaveTimer = useRef(null);
   const versionSnapshotTimer = useRef(null);
@@ -288,13 +290,27 @@ function App() {
     }
   }, [documents]);
 
-  // Open folder or file via native macOS picker
+  // Open folder or file via native macOS picker, with web fallback
   async function openFolder() {
     try {
       const res = await fetch(`${API_BASE}/pick-folder`, { method: 'POST' });
       const data = await res.json();
-      if (data.cancelled || !data.path) return;
 
+      if (data.unsupported) {
+        setFileBrowserOpen(true);
+        return;
+      }
+
+      if (data.cancelled || !data.path) return;
+      await applyFolderSelection(data);
+    } catch (err) {
+      console.error('Failed to open folder:', err);
+    }
+  }
+
+  // Shared handler for both native picker and web file browser results
+  async function applyFolderSelection(data) {
+    try {
       // Save the new docsDir (parent dir if a file was picked)
       await fetch(`${API_BASE}/settings`, {
         method: 'POST',
@@ -314,7 +330,7 @@ function App() {
         if (found) selectDoc(found.id);
       }
     } catch (err) {
-      console.error('Failed to open folder:', err);
+      console.error('Failed to apply folder selection:', err);
     }
   }
 
@@ -519,6 +535,17 @@ ${previewEl.innerHTML}
           onClose={() => {
             setSettingsOpen(false);
             loadDocuments(); // Refresh after settings change
+          }}
+        />
+      )}
+
+      {/* Web-based file browser (remote fallback) */}
+      {fileBrowserOpen && (
+        <FileBrowser
+          onClose={() => setFileBrowserOpen(false)}
+          onSelect={(data) => {
+            setFileBrowserOpen(false);
+            if (data.path) applyFolderSelection(data);
           }}
         />
       )}

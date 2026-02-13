@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X, FolderOpen, Check, Loader2, Ghost, Zap, AlertCircle } from 'lucide-react';
+import FileBrowser from './FileBrowser';
 
 const API_BASE = `${window.location.pathname.replace(/\/+$/, '')}/api`;
 
@@ -9,6 +10,7 @@ export default function SettingsModal({ onClose }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
+  const [fileBrowserOpen, setFileBrowserOpen] = useState(false);
 
   // AI settings
   const [aiSettings, setAiSettings] = useState({});
@@ -132,6 +134,10 @@ export default function SettingsModal({ onClose }) {
                   try {
                     const res = await fetch(`${API_BASE}/pick-folder`, { method: 'POST' });
                     const data = await res.json();
+                    if (data.unsupported) {
+                      setFileBrowserOpen(true);
+                      return;
+                    }
                     if (!data.cancelled && data.path) {
                       setDocsDir(data.path);
                       setResolvedDir(data.path);
@@ -256,6 +262,21 @@ export default function SettingsModal({ onClose }) {
             {saved ? 'Saved!' : 'Save'}
           </button>
         </div>
+
+        {/* Web-based file browser fallback */}
+        {fileBrowserOpen && (
+          <FileBrowser
+            initialPath={resolvedDir || docsDir || undefined}
+            onClose={() => setFileBrowserOpen(false)}
+            onSelect={(data) => {
+              setFileBrowserOpen(false);
+              if (data.path) {
+                setDocsDir(data.path);
+                setResolvedDir(data.path);
+              }
+            }}
+          />
+        )}
       </div>
     </div>
   );

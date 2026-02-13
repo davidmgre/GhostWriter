@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check } from 'lucide-react';
+import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -90,11 +90,15 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const [editMode, setEditMode] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [panelWidth, setPanelWidth] = useState(320);
+  const [models, setModels] = useState([]);
+  const [currentModel, setCurrentModel] = useState(null);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const isResizing = useRef(false);
   const abortRef = useRef(null);
   const confirmTimerRef = useRef(null);
+  const modelDropdownRef = useRef(null);
 
   // Persist messages to sessionStorage
   useEffect(() => {
@@ -154,6 +158,30 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       .then(result => setBackendStatus(result.ok ? 'connected' : 'error'))
       .catch(() => setBackendStatus('error'));
   }, []);
+
+  // Fetch available models after connection succeeds
+  useEffect(() => {
+    if (backendStatus !== 'connected') return;
+    fetch(`${API_BASE}/ai/models`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.availableModels) setModels(data.availableModels);
+        if (data.currentModelId) setCurrentModel(data.currentModelId);
+      })
+      .catch(() => {});
+  }, [backendStatus]);
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    if (!modelDropdownOpen) return;
+    function handleClick(e) {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target)) {
+        setModelDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [modelDropdownOpen]);
 
   // Resize handler
   const handleMouseDown = useCallback((e) => {
@@ -334,6 +362,22 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     inputRef.current?.focus();
   }
 
+  function handleModelSelect(modelId) {
+    setModelDropdownOpen(false);
+    if (modelId === currentModel) return;
+    setCurrentModel(modelId);
+    fetch(`${API_BASE}/ai/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok) setCurrentModel(currentModel); // revert on error
+      })
+      .catch(() => setCurrentModel(currentModel));
+  }
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -394,6 +438,39 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             </span>
           )}
         </div>
+        {/* Model selector */}
+        {models.length > 0 && (
+          <div className="relative" ref={modelDropdownRef}>
+            <button
+              type="button"
+              onClick={() => setModelDropdownOpen(prev => !prev)}
+              className="flex items-center gap-1 px-2 py-1 rounded bg-[#1a1a1a] border border-[#262626] hover:border-[#404040] transition-colors"
+            >
+              <span className="text-[10px] text-neutral-400 max-w-[100px] truncate">
+                {currentModel || 'auto'}
+              </span>
+              <ChevronDown size={10} className={`text-neutral-500 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {modelDropdownOpen && (
+              <div className="absolute right-0 top-full mt-1 z-50 bg-[#141414] border border-[#262626] rounded-lg shadow-xl py-1 min-w-[180px] max-h-[240px] overflow-y-auto">
+                {models.map(m => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => handleModelSelect(m.id)}
+                    className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-[#1a1a1a] transition-colors flex items-center justify-between gap-2 ${
+                      m.id === currentModel ? 'text-blue-400' : 'text-neutral-400'
+                    }`}
+                    title={m.description || m.id}
+                  >
+                    <span className="truncate">{m.name || m.id}</span>
+                    {m.id === currentModel && <Check size={10} className="text-blue-400 shrink-0" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Messages */}

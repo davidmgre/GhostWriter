@@ -51,7 +51,36 @@ Copy your markdown as:
 ### Prerequisites
 
 - **Node.js** 18+
-- **Kiro CLI** — install from [kiro.dev/docs/cli](https://kiro.dev/docs/cli/)
+- **Kiro CLI** — required for AI chat features
+
+#### Install Kiro CLI
+
+**macOS:**
+```bash
+curl -fsSL https://cli.kiro.dev/install | bash
+```
+
+**Linux (deb):**
+```bash
+wget https://desktop-release.q.us-east-1.amazonaws.com/latest/kiro-cli.deb
+sudo dpkg -i kiro-cli.deb
+```
+
+See the [full installation guide](https://kiro.dev/docs/cli/installation/) for other Linux options (AppImage, zip).
+
+#### Authenticate
+
+After installing, log in with your Kiro account:
+
+```bash
+kiro-cli login
+```
+
+This opens your browser to complete authentication. You can verify everything is working with:
+
+```bash
+kiro-cli doctor
+```
 
 ### Install & Run
 
@@ -177,6 +206,15 @@ All endpoints are available at both `/api/*` and `/editor/api/*`.
 | `GET`  | `/api/settings`  | Load settings                              |
 | `POST` | `/api/settings`  | Save settings                              |
 | `GET`  | `/api/events`    | SSE stream for live file change notifications |
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| Chat shows "Kiro disconnected" | Run `kiro-cli login` to re-authenticate |
+| AI responses timeout | Check `kiro-cli doctor` for connection issues |
+| Kiro CLI not found | Ensure `kiro-cli` is in your PATH, or set the full path in Settings |
+| Edit mode changes not applied | Verify edit mode is toggled on (pencil icon in chat panel) |
 
 ## License
 

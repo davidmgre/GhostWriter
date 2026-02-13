@@ -3,6 +3,7 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
 import { getBackend, createBackend, disposeBackend } from './lib/ai-backends/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -41,6 +42,28 @@ function getDocsDir() {
   return path.isAbsolute(dir) ? dir : path.resolve(__dirname, dir);
 }
 
+// --- Edit mode + write tracking ---
+let editModeEnabled = false;
+// Track our own writes so the watcher can distinguish them from external (LLM) edits.
+// Maps absolute file path → timestamp of our last write.
+const ownWrites = new Map();
+const OWN_WRITE_WINDOW_MS = 2000; // ignore watcher events within 2s of our own write
+
+function markOwnWrite(filePath) {
+  ownWrites.set(filePath, Date.now());
+}
+
+function isOwnWrite(filePath) {
+  const ts = ownWrites.get(filePath);
+  if (!ts) return false;
+  if (Date.now() - ts < OWN_WRITE_WINDOW_MS) return true;
+  ownWrites.delete(filePath);
+  return false;
+}
+
+// Cache of last known good content per doc, used for rollback
+const lastKnownContent = new Map();
+
 // --- SSE clients for live reload ---
 let sseClients = [];
 
@@ -75,11 +98,43 @@ function setupFileWatcher() {
       if (watchDebounceTimers[key]) clearTimeout(watchDebounceTimers[key]);
       watchDebounceTimers[key] = setTimeout(() => {
         delete watchDebounceTimers[key];
+
         if (isMd) {
+          const absPath = path.join(dir, filename);
+
+          // Check if this was our own write
+          if (!isOwnWrite(absPath) && !editModeEnabled) {
+            // External edit while in read-only mode — revert it
+            const parts = filename.split(path.sep);
+            let docId;
+            if (parts.length === 1) {
+              docId = 'file:' + parts[0];
+            } else {
+              docId = parts[0];
+            }
+
+            const cached = lastKnownContent.get(docId);
+            if (cached !== undefined) {
+              try {
+                const currentContent = fs.readFileSync(absPath, 'utf-8');
+                if (currentContent !== cached) {
+                  console.log(`[ReadOnly] Reverting unauthorized edit to ${filename}`);
+                  markOwnWrite(absPath);
+                  fs.writeFileSync(absPath, cached, 'utf-8');
+                  broadcastSSE('edit-reverted', {
+                    docId,
+                    message: 'Edit reverted — Read-Only mode is active. Enable AI Edit to allow changes.'
+                  });
+                  return; // Don't broadcast normal file-changed
+                }
+              } catch (e) {
+                console.warn('[ReadOnly] Revert failed:', e.message);
+              }
+            }
+          }
+
           const parts = filename.split(path.sep);
-          // Could be a loose file (parts.length===1) or subfolder file
           if (parts.length === 1) {
-            // Loose .md file changed
             const fileId = 'file:' + parts[0];
             broadcastSSE('file-changed', { docId: fileId, file: parts[0], eventType });
           } else {
@@ -201,7 +256,7 @@ function registerApi(router) {
     res.json(result);
   });
 
-  router.post('/settings', (req, res) => {
+  router.post('/settings', async (req, res) => {
     try {
       const body = req.body;
 
@@ -229,6 +284,11 @@ function registerApi(router) {
 
       if (body.docsDir !== undefined) {
         setupFileWatcher();
+        // Reset ACP session so it picks up the new cwd
+        try {
+          const backend = await getBackend(settings);
+          if (backend.resetSession) await backend.resetSession();
+        } catch { /* backend may not be initialized yet */ }
       }
 
       res.json({
@@ -239,6 +299,51 @@ function registerApi(router) {
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // --- File/folder picker (macOS native dialog via osascript + JXA) ---
+  router.post('/pick-folder', (req, res) => {
+    const defaultPath = getDocsDir().replace(/'/g, "\\'");
+    const script = `
+      ObjC.import('Cocoa');
+      var app = $.NSApplication.sharedApplication;
+      app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+      app.activateIgnoringOtherApps(true);
+      var panel = $.NSOpenPanel.openPanel;
+      panel.setCanChooseFiles(true);
+      panel.setCanChooseDirectories(true);
+      panel.setAllowsMultipleSelection(false);
+      panel.setAllowedFileTypes($(['md', 'markdown']));
+      panel.setMessage($('Select a documents folder or markdown file'));
+      panel.setPrompt($('Open'));
+      panel.setDirectoryURL($.NSURL.fileURLWithPath($('${defaultPath}')));
+      var result = panel.runModal;
+      if (result === $.NSModalResponseOK) {
+        ObjC.unwrap(panel.URL.path);
+      } else {
+        'CANCELLED';
+      }`;
+    execFile('osascript', ['-l', 'JavaScript', '-e', script], { timeout: 120000 }, (err, stdout) => {
+      if (err) {
+        return res.json({ cancelled: true });
+      }
+      const picked = stdout.trim();
+      if (picked === 'CANCELLED') {
+        return res.json({ cancelled: true });
+      }
+      try {
+        const stat = fs.statSync(picked);
+        if (stat.isFile()) {
+          const parentDir = path.dirname(picked);
+          const filename = path.basename(picked);
+          res.json({ path: parentDir, isFile: true, filename });
+        } else {
+          res.json({ path: picked, isFile: false });
+        }
+      } catch (e) {
+        res.json({ cancelled: true, error: e.message });
+      }
+    });
   });
 
   // --- SSE endpoint ---
@@ -330,6 +435,7 @@ function registerApi(router) {
         ? fs.readFileSync(docPath, 'utf-8')
         : '# Untitled\n\nStart writing here...';
 
+      lastKnownContent.set(id, content);
       res.json({ content, type: isFileId(id) ? 'file' : 'project' });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -345,7 +451,9 @@ function registerApi(router) {
       if (isFileId(id)) {
         // Loose file — just write directly, no versions
         const filePath = getDocPath(id);
+        markOwnWrite(filePath);
         fs.writeFileSync(filePath, content, 'utf-8');
+        lastKnownContent.set(id, content);
         res.json({ success: true, timestamp: new Date().toISOString() });
       } else {
         // Subfolder project — write + version snapshot
@@ -355,7 +463,9 @@ function registerApi(router) {
         }
 
         const docPath = getDocPath(id);
+        markOwnWrite(docPath);
         fs.writeFileSync(docPath, content, 'utf-8');
+        lastKnownContent.set(id, content);
         const versionTimestamp = createVersionSnapshot(id, content);
 
         res.json({ success: true, timestamp: new Date().toISOString(), versionTimestamp });
@@ -365,30 +475,88 @@ function registerApi(router) {
     }
   });
 
-  // --- Create new document (subfolder type) ---
+  // --- Create new document (simple .md file) ---
   router.post('/documents', (req, res) => {
     try {
       const { slug } = req.body;
-      const date = new Date().toISOString().split('T')[0];
-      const docId = `${date}-${slug || 'untitled'}`;
-      const docDir = path.join(getDocsDir(), docId);
+      const filename = (slug || 'untitled') + '.md';
+      const filePath = path.join(getDocsDir(), filename);
 
-      if (fs.existsSync(docDir)) {
-        return res.status(400).json({ error: 'Document already exists' });
+      if (fs.existsSync(filePath)) {
+        return res.status(400).json({ error: 'A file with that name already exists' });
       }
 
       // Derive a readable title from the slug
       const title = (slug || 'Untitled').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
-      fs.mkdirSync(docDir, { recursive: true });
-      fs.mkdirSync(path.join(docDir, 'versions'), { recursive: true });
-      fs.writeFileSync(
-        path.join(docDir, 'draft.md'),
-        `# ${title}\n\nStart writing here...`,
-        'utf-8'
-      );
+      fs.writeFileSync(filePath, `# ${title}\n\nStart writing here...`, 'utf-8');
+      broadcastSSE('list-changed', {});
 
-      res.json({ id: docId });
+      res.json({ id: 'file:' + filename });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Rename document ---
+  router.post('/documents/:id/rename', (req, res) => {
+    try {
+      const id = decodeURIComponent(req.params.id);
+      const { newName } = req.body;
+      if (!newName || !newName.trim()) {
+        return res.status(400).json({ error: 'Name is required' });
+      }
+
+      const dir = getDocsDir();
+      const slug = newName.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      if (!slug) {
+        return res.status(400).json({ error: 'Invalid name' });
+      }
+
+      if (isFileId(id)) {
+        // File type: rename the .md file
+        const oldFilename = id.slice(5); // strip "file:"
+        const newFilename = slug + '.md';
+        if (oldFilename === newFilename) {
+          return res.json({ newId: id });
+        }
+        const oldPath = path.join(dir, oldFilename);
+        const newPath = path.join(dir, newFilename);
+        if (fs.existsSync(newPath)) {
+          return res.status(400).json({ error: 'A file with that name already exists' });
+        }
+        fs.renameSync(oldPath, newPath);
+        // Update tracking caches
+        const oldContent = lastKnownContent.get(id);
+        if (oldContent !== undefined) {
+          lastKnownContent.delete(id);
+          lastKnownContent.set('file:' + newFilename, oldContent);
+        }
+        broadcastSSE('list-changed', {});
+        res.json({ newId: 'file:' + newFilename });
+      } else {
+        // Project type: rename the folder, keeping the date prefix
+        const match = id.match(/^(\d{4}-\d{2}-\d{2})-(.+)$/);
+        const datePrefix = match ? match[1] : '';
+        const newFolderId = datePrefix ? `${datePrefix}-${slug}` : slug;
+        if (id === newFolderId) {
+          return res.json({ newId: id });
+        }
+        const oldDir = path.join(dir, id);
+        const newDir = path.join(dir, newFolderId);
+        if (fs.existsSync(newDir)) {
+          return res.status(400).json({ error: 'A document with that name already exists' });
+        }
+        fs.renameSync(oldDir, newDir);
+        // Update tracking caches
+        const oldContent = lastKnownContent.get(id);
+        if (oldContent !== undefined) {
+          lastKnownContent.delete(id);
+          lastKnownContent.set(newFolderId, oldContent);
+        }
+        broadcastSSE('list-changed', {});
+        res.json({ newId: newFolderId });
+      }
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -454,7 +622,9 @@ function registerApi(router) {
       const currentContent = fs.readFileSync(docPath, 'utf-8');
       createVersionSnapshot(id, currentContent);
 
+      markOwnWrite(docPath);
       fs.writeFileSync(docPath, content, 'utf-8');
+      lastKnownContent.set(id, content);
       res.json({ success: true, timestamp: new Date().toISOString() });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -547,6 +717,25 @@ function registerApi(router) {
     }
   });
 
+  // --- Edit mode control ---
+  router.post('/edit-mode', async (req, res) => {
+    const { enabled } = req.body;
+    editModeEnabled = !!enabled;
+    console.log(`[EditMode] ${editModeEnabled ? 'ENABLED' : 'DISABLED (read-only)'}`);
+    // Sync to ACP backend so it can auto-approve/reject tool permission requests
+    try {
+      const backend = await getBackend(settings);
+      if (backend.editModeEnabled !== undefined) {
+        backend.editModeEnabled = editModeEnabled;
+      }
+    } catch {}
+    res.json({ editMode: editModeEnabled });
+  });
+
+  router.get('/edit-mode', (req, res) => {
+    res.json({ editMode: editModeEnabled });
+  });
+
   router.post('/ai/chat', async (req, res) => {
     const { message, history = [], context } = req.body;
     if (!message) return res.status(400).json({ error: 'message is required' });
@@ -570,8 +759,33 @@ function registerApi(router) {
       if (context && settings.ai_include_context !== 'false') {
         const contextParts = [];
         if (context.page) contextParts.push(`User is on the "${context.page}" page.`);
-        if (context.documentTitle) contextParts.push(`Currently editing: "${context.documentTitle}"`);
-        if (context.documentExcerpt) contextParts.push(`Document excerpt:\n${context.documentExcerpt}`);
+        if (context.documentTitle) {
+          const docId = context.documentId || context.documentTitle;
+          const filePath = getDocPath(docId);
+          contextParts.push(`Currently editing: "${context.documentTitle}"`);
+          contextParts.push(`File path: ${filePath}`);
+
+          // Include version history path for project-type docs
+          const versionsDir = getVersionsDir(docId);
+          if (versionsDir) {
+            contextParts.push(`Version history directory: ${versionsDir}`);
+            contextParts.push('The editor automatically saves version snapshots. You can reference past versions if needed.');
+          }
+        }
+        if (context.documentExcerpt) contextParts.push(`Document content:\n${context.documentExcerpt}`);
+
+        // Edit mode instructions
+        if (context.editMode) {
+          contextParts.push('\n--- AI EDIT MODE ENABLED ---');
+          contextParts.push('You have permission to directly edit the document file. Write changes directly to the file path above.');
+          contextParts.push('The editor has automatic version history, so all changes can be rolled back safely.');
+          contextParts.push('When making edits, briefly explain what you changed.');
+        } else {
+          contextParts.push('\n--- READ-ONLY MODE ---');
+          contextParts.push('Do not modify the document file. Only suggest changes in your response text.');
+          contextParts.push('When suggesting changes, show the content as plain text, not wrapped in code blocks (unless the content itself is code).');
+          contextParts.push('If the user asks you to make edits, tell them in plain text (no code blocks): they can switch to AI Edit mode using the toggle at the bottom of the chat panel, and you will apply the changes directly.');
+        }
         if (contextParts.length > 0) {
           systemPrompt = (systemPrompt ? systemPrompt + '\n\n' : '') +
             'Context:\n' + contextParts.join('\n');

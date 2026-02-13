@@ -1,0 +1,8 @@
+node_modules/
+dist/
+logs/
+documents/
+.DS_Store
+chat-messages.json
+chat-notifications.json
+settings.json

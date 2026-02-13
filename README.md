@@ -2,6 +2,10 @@
 
 A modern markdown editor with built-in AI chat, multi-format export, and automatic version history.
 
+<p align="center">
+  <img src="docs/GhostWriter-main.png" alt="GhostWriter" width="800" />
+</p>
+
 GhostWriter connects to [Kiro](https://kiro.dev) via the [Agent Communication Protocol (ACP)](https://kiro.dev/docs/cli/acp/) — an open standard that enables AI agents to communicate with any compatible editor through a language-agnostic, JSON-RPC 2.0 interface.
 
 ## Features
@@ -27,17 +31,19 @@ Copy your markdown as:
 - **Cleanup tools** — prune old versions (keeps minimum 10, removes 30+ day old snapshots)
 
 ### AI Chat (Kiro)
+- **Read / Edit modes** — toggle between read-only chat and AI-powered file editing
 - **Streaming responses** — tokens appear as they're generated
 - **Markdown rendering** — AI responses render with full formatting
+- **Auto-approve edits** — file changes are applied automatically in Edit mode
 - **Session persistence** — conversation survives page navigation
 - **Connection status** — live indicator shows whether Kiro is connected
-- **Thinking indicator** — visual feedback while the AI processes your request
 
 ### Document Management
 - **Sidebar browser** — navigate between documents
 - **Two document types:**
   - **Projects** (folders with `draft.md` + version history)
-  - **Loose files** (standalone `.md` files, no version tracking)
+  - **Markdown files** (standalone `.md` files)
+- **Inline rename** — right-click or three-dot menu to rename documents
 - **Live reload** — external file changes detected and reflected immediately via SSE
 
 ## Getting Started
@@ -50,8 +56,8 @@ Copy your markdown as:
 ### Install & Run
 
 ```bash
-git clone https://github.com/your-org/ghostwriter-md.git
-cd ghostwriter-md
+git clone https://github.com/davidmgre/GhostWriter.git
+cd GhostWriter
 npm install
 npm run build
 node server.mjs
@@ -80,7 +86,7 @@ Click the gear icon in the header to access settings:
 |--------------------------|------------------------------------------------------|-------------|
 | Documents Directory      | Where markdown files are stored                      | `./documents` |
 | Kiro CLI Command         | Path or command name for `kiro-cli`                  | `kiro-cli`  |
-| System Prompt            | Custom instructions prepended to every AI conversation | _(empty)_ |
+| Custom Instructions      | Optional instructions included with every message sent to Kiro | _(empty)_ |
 | Max Conversation History | Number of messages included as context               | `20`        |
 
 Use **Test Connection** to verify Kiro is reachable before saving.
@@ -102,26 +108,26 @@ ACP is an open standard — any AI agent that implements the protocol can work w
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────┐
-│ Browser                                       │
-│                                               │
-│ ┌──────────┐ ┌──────────┐ ┌───────────────┐  │
-│ │ Editor   │ │ Preview  │ │ Chat Panel    │  │
-│ │(CodeMir) │ │(react-md)│ │(SSE streaming)│  │
-│ └────┬─────┘ └──────────┘ └───────┬───────┘  │
-│      │         REST API           │           │
-├──────┴────────────────────────────┴───────────┤
-│ Express Server (port 3888)                    │
-│                                               │
-│ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │
-│ │ File I/O │ │ SSE/Watch│ │ ACP Client   │   │
-│ │ (fs)     │ │ (FSEvent)│ │ (JSON-RPC)   │   │
-│ └──────────┘ └──────────┘ └──────┬───────┘   │
-│                                  │ stdio      │
-│                           ┌──────┴───────┐    │
-│                           │ kiro-cli acp │    │
-│                           └──────────────┘    │
-└───────────────────────────────────────────────┘
++-----------------------------------------------+
+| Browser                                       |
+|                                               |
+| +----------+ +----------+ +---------------+   |
+| | Editor   | | Preview  | | Chat Panel    |   |
+| |(CodeMir) | |(react-md)| |(SSE streaming)|   |
+| +----+-----+ +----------+ +-------+-------+   |
+|      |         REST API           |           |
++------+----------------------------+-----------+
+| Express Server (port 3888)                    |
+|                                               |
+| +----------+ +----------+ +--------------+    |
+| | File I/O | | SSE/Watch| | ACP Client   |    |
+| | (fs)     | | (FSEvent)| | (JSON-RPC)   |    |
+| +----------+ +----------+ +------+-------+    |
+|                                  | stdio      |
+|                           +------+-------+    |
+|                           | kiro-cli acp |    |
+|                           +--------------+    |
++-----------------------------------------------+
 ```
 
 ## Tech Stack
@@ -152,6 +158,7 @@ All endpoints are available at both `/api/*` and `/editor/api/*`.
 | `GET`  | `/api/documents/:id/versions/:ts` | Get version content      |
 | `POST` | `/api/documents/:id/restore/:ts`  | Restore a version        |
 | `POST` | `/api/documents/:id/cleanup`      | Clean up old versions    |
+| `POST` | `/api/documents/:id/rename`       | Rename a document        |
 
 ### AI Chat
 
@@ -160,6 +167,8 @@ All endpoints are available at both `/api/*` and `/editor/api/*`.
 | `POST` | `/api/ai/chat`   | Send message, receive streaming SSE response |
 | `POST` | `/api/ai/test`   | Test Kiro connection                       |
 | `POST` | `/api/ai/reset`  | Reset AI chat session                      |
+| `POST` | `/api/edit-mode` | Toggle AI Edit mode (read-only / editing)  |
+| `GET`  | `/api/edit-mode` | Get current edit mode state                |
 
 ### Settings & Events
 

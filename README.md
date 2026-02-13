@@ -35,7 +35,14 @@ Copy your markdown as:
 - **Streaming responses** — tokens appear as they're generated
 - **Markdown rendering** — AI responses render with full formatting
 - **Auto-approve edits** — file changes are applied automatically in Edit mode
-- **Session persistence** — conversation survives page navigation
+- **Stop generation** — cancel button sends `session/cancel` to Kiro, stopping generation server-side
+- **Tool call progress** — see what Kiro is doing in real-time (reading files, writing changes, etc.)
+- **Model selection** — switch between available models mid-session
+- **Image input** — paste or drag-drop images into chat for visual context
+- **Context usage indicator** — color-coded bar showing context window consumption (green/yellow/red)
+- **Compaction status** — shows when Kiro is compacting context during long sessions
+- **Slash commands** — type `/` for autocomplete of available Kiro commands
+- **Session persistence** — conversations survive server restarts (sessions resume via `session/load`)
 - **Connection status** — live indicator shows whether Kiro is connected
 
 ### Document Management
@@ -128,9 +135,11 @@ GhostWriter uses the **Agent Communication Protocol (ACP)** to communicate with 
 
 1. The editor spawns `kiro-cli acp` as a child process
 2. Communication happens over **stdin/stdout** using **JSON-RPC 2.0**
-3. A session is established (`initialize` → `session/new`)
-4. Messages are sent via `session/prompt` and responses stream back as `session/update` notifications
-5. The same Kiro process is reused across conversations for fast response times
+3. A session is established (`initialize` → `session/new`), or resumed from disk (`session/load`)
+4. Messages are sent via `session/prompt` with text and image content blocks
+5. Responses stream back as `session/update` notifications (text chunks, tool calls, context usage)
+6. Tool permissions are auto-approved in Edit mode, auto-rejected in Read mode
+7. The same Kiro process is reused across conversations for fast response times
 
 ACP is an open standard — any AI agent that implements the protocol can work with GhostWriter.
 
@@ -170,6 +179,7 @@ ACP is an open standard — any AI agent that implements the protocol can work w
 | Preview       | react-markdown + remark-gfm                           |
 | AI Protocol   | ACP (JSON-RPC 2.0 over stdio)                         |
 | File Watching | macOS FSEvents / Linux inotify (via `fs.watch`)       |
+| Testing       | Vitest 4                                               |
 
 ## API Reference
 
@@ -191,13 +201,19 @@ All endpoints are available at both `/api/*` and `/editor/api/*`.
 
 ### AI Chat
 
-| Method | Endpoint         | Description                                |
-|--------|------------------|--------------------------------------------|
-| `POST` | `/api/ai/chat`   | Send message, receive streaming SSE response |
-| `POST` | `/api/ai/test`   | Test Kiro connection                       |
-| `POST` | `/api/ai/reset`  | Reset AI chat session                      |
-| `POST` | `/api/edit-mode` | Toggle AI Edit mode (read-only / editing)  |
-| `GET`  | `/api/edit-mode` | Get current edit mode state                |
+| Method | Endpoint                   | Description                                |
+|--------|----------------------------|--------------------------------------------|
+| `POST` | `/api/ai/chat`             | Send message, receive streaming SSE response |
+| `POST` | `/api/ai/test`             | Test Kiro connection                       |
+| `POST` | `/api/ai/reset`            | Reset AI chat session                      |
+| `POST` | `/api/ai/cancel`           | Cancel current generation (session/cancel) |
+| `GET`  | `/api/ai/models`           | List available models                      |
+| `POST` | `/api/ai/model`            | Switch active model                        |
+| `GET`  | `/api/ai/commands`         | List available slash commands               |
+| `POST` | `/api/ai/commands/execute` | Execute a slash command                    |
+| `GET`  | `/api/ai/context-usage`    | Get context window usage and compaction state |
+| `POST` | `/api/edit-mode`           | Toggle AI Edit mode (read-only / editing)  |
+| `GET`  | `/api/edit-mode`           | Get current edit mode state                |
 
 ### Settings & Events
 

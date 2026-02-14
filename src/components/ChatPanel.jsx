@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2 } from 'lucide-react';
+import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2, RefreshCw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -106,6 +106,28 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const confirmTimerRef = useRef(null);
   const modelDropdownRef = useRef(null);
   const slashMenuRef = useRef(null);
+  const retryTimerRef = useRef(null);
+  const retryCountRef = useRef(0);
+
+  // Reusable connection test — resolves to 'connected' or 'error'
+  const testConnection = useCallback(() => {
+    setBackendStatus('unknown');
+    fetch(`${API_BASE}/ai/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then(r => r.json())
+      .then(result => {
+        if (result.ok) {
+          retryCountRef.current = 0;
+          setBackendStatus('connected');
+        } else {
+          setBackendStatus('error');
+        }
+      })
+      .catch(() => setBackendStatus('error'));
+  }, []);
 
   // Persist messages to sessionStorage
   useEffect(() => {
@@ -129,13 +151,12 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     }
   }, [confirmClear]);
 
-  // Listen for edit-reverted SSE events
+  // Listen for SSE events — edit-reverted + server disconnect detection
   useEffect(() => {
     const es = new EventSource(`${API_BASE}/events`);
     es.addEventListener('edit-reverted', (e) => {
       try {
         const data = JSON.parse(e.data);
-        // Add a system notification to the chat
         const revertMsg = {
           id: nextId(),
           role: 'error',
@@ -145,8 +166,17 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         setMessages(prev => [...prev, revertMsg]);
       } catch {}
     });
+    // When the server goes down, EventSource fires onerror (readyState will be
+    // CONNECTING since EventSource auto-reconnects, not CLOSED)
+    es.onerror = () => {
+      setBackendStatus('error');
+    };
+    // When it reconnects (EventSource auto-reconnects), re-test the backend
+    es.addEventListener('connected', () => {
+      testConnection();
+    });
     return () => es.close();
-  }, []);
+  }, [testConnection]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -155,16 +185,20 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
 
   // Test connection on mount
   useEffect(() => {
-    setBackendStatus('unknown');
-    fetch(`${API_BASE}/ai/test`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    })
-      .then(r => r.json())
-      .then(result => setBackendStatus(result.ok ? 'connected' : 'error'))
-      .catch(() => setBackendStatus('error'));
-  }, []);
+    testConnection();
+  }, [testConnection]);
+
+  // Auto-retry on disconnect — backoff: 3s, 6s, 12s, then every 30s
+  useEffect(() => {
+    if (backendStatus !== 'error') return;
+    const count = retryCountRef.current;
+    const delay = count < 3 ? 3000 * Math.pow(2, count) : 30000;
+    retryTimerRef.current = setTimeout(() => {
+      retryCountRef.current = count + 1;
+      testConnection();
+    }, delay);
+    return () => clearTimeout(retryTimerRef.current);
+  }, [backendStatus, testConnection]);
 
   // Fetch available models after connection succeeds
   useEffect(() => {
@@ -188,6 +222,25 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       })
       .catch(() => {});
   }, [backendStatus]);
+
+  // Fetch context usage from backend — reusable helper
+  const fetchContextUsage = useCallback(() => {
+    fetch(`${API_BASE}/ai/context-usage`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.usage && data.usage.percentage != null) setContextUsage(data.usage);
+        if (data.compacting !== undefined) setCompacting(data.compacting);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Poll context usage after connection — initial fetch + every 30s
+  useEffect(() => {
+    if (backendStatus !== 'connected') return;
+    fetchContextUsage();
+    const interval = setInterval(fetchContextUsage, 30000);
+    return () => clearInterval(interval);
+  }, [backendStatus, fetchContextUsage]);
 
   // Close model dropdown on outside click
   useEffect(() => {
@@ -259,10 +312,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         context.documentTitle = currentDoc.title || currentDoc.id;
         context.documentId = currentDoc.id;
         if (documentContent) {
-          // Send first ~2000 chars as excerpt to keep token usage reasonable
-          context.documentExcerpt = documentContent.length > 2000
-            ? documentContent.slice(0, 2000) + '\n...(truncated)'
-            : documentContent;
+          context.documentContent = documentContent;
         }
       }
 
@@ -368,6 +418,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           )
         );
       } else {
+        setBackendStatus('error');
         setMessages(prev =>
           prev.map(m => m.id === assistantMsg.id
             ? { ...m, role: 'error', content: err.message }
@@ -381,6 +432,8 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       setToolCalls([]);
       abortRef.current = null;
       inputRef.current?.focus();
+      // Refresh context usage after each chat turn
+      fetchContextUsage();
     }
   }
 
@@ -539,22 +592,31 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-neutral-400">👻 GhostWriter</span>
           {backendName && (
-            <span className="flex items-center gap-1" title={
-              backendStatus === 'connected' ? `${backendName} is connected` :
-              backendStatus === 'error' ? `${backendName} disconnected — check Settings` :
-              `Connecting to ${backendName}...`
-            }>
-              <Circle size={6} className={
-                backendStatus === 'connected' ? 'text-green-500 fill-green-500' :
-                backendStatus === 'error' ? 'text-red-500 fill-red-500' :
-                'text-yellow-500 fill-yellow-500 animate-pulse'
-              } />
-              <span className={`text-[10px] ${backendStatus === 'error' ? 'text-red-400' : 'text-neutral-600'}`}>
-                {backendStatus === 'connected' ? `${backendName} connected` :
-                 backendStatus === 'error' ? `${backendName} disconnected` :
-                 'Connecting...'}
+            backendStatus === 'error' ? (
+              <button
+                type="button"
+                onClick={() => { retryCountRef.current = 0; testConnection(); }}
+                className="flex items-center gap-1 hover:opacity-80 transition-opacity"
+                title={`${backendName} disconnected — click to reconnect`}
+              >
+                <Circle size={6} className="text-red-500 fill-red-500" />
+                <span className="text-[10px] text-red-400">{backendName} disconnected</span>
+                <RefreshCw size={10} className="text-red-400 ml-0.5" />
+              </button>
+            ) : (
+              <span className="flex items-center gap-1" title={
+                backendStatus === 'connected' ? `${backendName} is connected` :
+                `Connecting to ${backendName}...`
+              }>
+                <Circle size={6} className={
+                  backendStatus === 'connected' ? 'text-green-500 fill-green-500' :
+                  'text-yellow-500 fill-yellow-500 animate-pulse'
+                } />
+                <span className="text-[10px] text-neutral-600">
+                  {backendStatus === 'connected' ? `${backendName} connected` : 'Connecting...'}
+                </span>
               </span>
-            </span>
+            )
           )}
         </div>
         {/* Model selector */}
@@ -770,6 +832,23 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               ))}
           </div>
         )}
+        {/* Offline banner */}
+        {backendStatus === 'error' && (
+          <div className="flex items-center gap-2 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2">
+            <Circle size={6} className="text-red-500 fill-red-500 shrink-0" />
+            <span className="text-[11px] text-neutral-400">
+              AI chat offline — editing still works
+            </span>
+            <button
+              type="button"
+              onClick={() => { retryCountRef.current = 0; testConnection(); }}
+              className="ml-auto text-[11px] text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1"
+            >
+              <RefreshCw size={10} />
+              Retry
+            </button>
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <textarea
             ref={inputRef}
@@ -787,9 +866,12 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             onPaste={handlePaste}
             onDrop={handleDrop}
             onDragOver={(e) => e.preventDefault()}
-            placeholder={images.length > 0 ? 'Describe what to do with the image...' : 'Ask GhostWriter...'}
+            placeholder={backendStatus === 'error' ? 'AI chat unavailable — editing still works' : images.length > 0 ? 'Describe what to do with the image...' : 'Ask GhostWriter...'}
             rows={3}
-            className="flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-y max-h-[200px] overflow-y-auto"
+            disabled={backendStatus === 'error'}
+            className={`flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-y max-h-[200px] overflow-y-auto ${
+              backendStatus === 'error' ? 'text-neutral-500 opacity-60 cursor-not-allowed' : 'text-neutral-200'
+            }`}
           />
           <div className="flex flex-col gap-1.5 shrink-0">
             <button
@@ -812,8 +894,9 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim()}
+                disabled={!input.trim() || backendStatus === 'error'}
                 className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title={backendStatus === 'error' ? 'AI chat offline' : 'Send message'}
               >
                 <Send size={14} className="text-white" />
               </button>

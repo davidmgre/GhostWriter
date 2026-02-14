@@ -4,9 +4,19 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execFile } from 'child_process';
-import { getBackend, createBackend, disposeBackend } from './lib/ai-backends/index.js';
+import { getBackend, disposeBackend } from './lib/ai-backends/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Abbreviate paths for logging — avoid leaking full host/volume paths
+function logPath(p) {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  if (home && p.startsWith(home)) return '~' + p.slice(home.length);
+  // For external volumes or long paths, show only the last 2 segments
+  const segments = p.split(path.sep).filter(Boolean);
+  if (segments.length > 2) return '.../' + segments.slice(-2).join('/');
+  return p;
+}
 
 const app = express();
 const PORT = 3888;
@@ -151,7 +161,7 @@ function setupFileWatcher() {
       console.warn('File watcher error:', err.message);
     });
 
-    console.log(`✓ File watcher active on: ${dir}`);
+    console.log(`✓ File watcher active on: ${logPath(dir)}`);
   } catch (err) {
     console.warn('Failed to setup file watcher:', err.message);
   }
@@ -738,18 +748,13 @@ function registerApi(router) {
   // --- AI Chat ---
   router.post('/ai/test', async (req, res) => {
     try {
-      const testSettings = { ...settings, ...req.body };
       console.log('[AI Test] backend=kiro');
-      const backend = createBackend(testSettings);
-      try {
-        const start = Date.now();
-        const result = await backend.testConnection();
-        const latency = Date.now() - start;
-        console.log(`[AI Test] ${result.ok ? '✓' : '✗'} ${result.ok ? result.model : result.error} (${latency}ms)`);
-        res.json({ ...result, latency_ms: latency });
-      } finally {
-        await backend.dispose();
-      }
+      const backend = await getBackend(settings);
+      const start = Date.now();
+      const result = await backend.testConnection();
+      const latency = Date.now() - start;
+      console.log(`[AI Test] ${result.ok ? '✓' : '✗'} ${result.ok ? result.model : result.error} (${latency}ms)`);
+      res.json({ ...result, latency_ms: latency });
     } catch (err) {
       console.error(`[AI Test] ✗ exception: ${err.message}`);
       res.json({ ok: false, error: err.message });
@@ -902,41 +907,67 @@ function registerApi(router) {
       const backend = await getBackend(settings);
       console.log(`[AI Chat] backend instance: ${backend.getDisplayName()}`);
 
-      // Build system prompt
+      // Build system prompt — appended as additional context, not replacing Kiro's own config
       let systemPrompt = settings.ai_system_prompt || '';
       if (context && settings.ai_include_context !== 'false') {
         const contextParts = [];
-        if (context.page) contextParts.push(`User is on the "${context.page}" page.`);
+        contextParts.push('You are operating inside GhostWriter, a markdown document editor. The user has a .md file open and is working on it right now.');
+
+        // Document resource — sent as a separate ACP resource content block, not in system prompt text
+        let documentResource = null;
         if (context.documentTitle) {
           const docId = context.documentId || context.documentTitle;
           const filePath = getDocPath(docId);
-          contextParts.push(`Currently editing: "${context.documentTitle}"`);
+          contextParts.push(`\nActive document: "${context.documentTitle}"`);
           contextParts.push(`File path: ${filePath}`);
 
           // Include version history path for project-type docs
           const versionsDir = getVersionsDir(docId);
           if (versionsDir) {
             contextParts.push(`Version history directory: ${versionsDir}`);
-            contextParts.push('The editor automatically saves version snapshots. You can reference past versions if needed.');
+          }
+
+          // Document content — sent both as ACP resource block (typed file) and as
+          // text in the system prompt (fallback if agent ignores resource blocks).
+          // Budget: 100K chars ≈ 25K tokens — fits comfortably in all supported models.
+          const MAX_DOC_CHARS = 100_000;
+          const docContent = context.documentContent || '';
+          if (docContent) {
+            const truncated = docContent.length > MAX_DOC_CHARS;
+            const includedContent = truncated ? docContent.slice(0, MAX_DOC_CHARS) : docContent;
+
+            // ACP resource block — Kiro sees this as a typed file with URI
+            documentResource = {
+              uri: `file://${filePath}`,
+              content: includedContent,
+              mimeType: 'text/markdown',
+            };
+
+            // Text fallback — included in system prompt for agents that don't support resource blocks
+            if (truncated) {
+              contextParts.push(`\nDocument content (first ${MAX_DOC_CHARS.toLocaleString()} of ${docContent.length.toLocaleString()} chars — read the full file from disk if needed):\n${includedContent}`);
+            } else {
+              contextParts.push(`\nCurrent document content:\n${includedContent}`);
+            }
           }
         }
-        if (context.documentExcerpt) contextParts.push(`Document content:\n${context.documentExcerpt}`);
 
         // Edit mode instructions
         if (context.editMode) {
           contextParts.push('\n--- AI EDIT MODE ENABLED ---');
-          contextParts.push('You have permission to directly edit the document file. Write changes directly to the file path above.');
+          contextParts.push('You MUST write your changes directly to the file path above. Do not just show content in chat — use your file write tool to update the document.');
+          contextParts.push('When the user asks you to write, draft, rewrite, or create content, write it into the document file.');
           contextParts.push('The editor has automatic version history, so all changes can be rolled back safely.');
-          contextParts.push('When making edits, briefly explain what you changed.');
+          contextParts.push('After writing, briefly explain what you changed in your chat reply.');
         } else {
           contextParts.push('\n--- READ-ONLY MODE ---');
           contextParts.push('Do not modify the document file. Only suggest changes in your response text.');
           contextParts.push('When suggesting changes, show the content as plain text, not wrapped in code blocks (unless the content itself is code).');
-          contextParts.push('If the user asks you to make edits, tell them in plain text (no code blocks): they can switch to AI Edit mode using the toggle at the bottom of the chat panel, and you will apply the changes directly.');
+          contextParts.push('If the user asks you to make edits, let them know they can switch to AI Edit mode using the toggle at the bottom of the chat panel, and you will apply the changes directly to the file.');
         }
         if (contextParts.length > 0) {
           systemPrompt = (systemPrompt ? systemPrompt + '\n\n' : '') +
-            'Context:\n' + contextParts.join('\n');
+            contextParts.join('\n');
         }
       }
 
@@ -944,9 +975,9 @@ function registerApi(router) {
       const maxHistory = parseInt(settings.ai_max_history || '20', 10);
       const messages = [...history.slice(-maxHistory), { role: 'user', content: message }];
 
-      // Stream (pass image attachments if any)
+      // Stream (pass image attachments and document resource)
       let chunkCount = 0;
-      for await (const chunk of backend.chatStream(messages, systemPrompt || undefined, images.length > 0 ? images : undefined)) {
+      for await (const chunk of backend.chatStream(messages, systemPrompt || undefined, images.length > 0 ? images : undefined, documentResource)) {
         chunkCount++;
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         if (chunk.type === 'done') {
@@ -1035,7 +1066,7 @@ app.get(/^\/(?!api|editor).*/, (req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`GhostWriter running at http://localhost:${PORT}`);
-  console.log(`Documents directory: ${getDocsDir()}`);
+  console.log(`Documents directory: ${logPath(getDocsDir())}`);
   setupFileWatcher();
 });
 

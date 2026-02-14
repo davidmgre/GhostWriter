@@ -14,5 +14,15 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    chunkSizeWarningLimit: 700,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'codemirror': ['codemirror', '@codemirror/state', '@codemirror/view', '@codemirror/lang-markdown', '@codemirror/theme-one-dark', '@uiw/react-codemirror'],
+          'markdown': ['react-markdown', 'remark-gfm', 'rehype-raw', 'rehype-sanitize'],
+        },
+      },
+    },
   },
 })

@@ -909,12 +909,12 @@ function registerApi(router) {
 
       // Build system prompt — appended as additional context, not replacing Kiro's own config
       let systemPrompt = settings.ai_system_prompt || '';
+      let documentResource = null;
       if (context && settings.ai_include_context !== 'false') {
         const contextParts = [];
         contextParts.push('You are operating inside GhostWriter, a markdown document editor. The user has a .md file open and is working on it right now.');
 
         // Document resource — sent as a separate ACP resource content block, not in system prompt text
-        let documentResource = null;
         if (context.documentTitle) {
           const docId = context.documentId || context.documentTitle;
           const filePath = getDocPath(docId);

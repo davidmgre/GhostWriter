@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2, RefreshCw } from 'lucide-react';
+import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2, RefreshCw, FileText } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -98,7 +98,9 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const [compacting, setCompacting] = useState(false);
   const [slashCommands, setSlashCommands] = useState([]); // available slash commands
   const [showSlashMenu, setShowSlashMenu] = useState(false);
-  const [images, setImages] = useState([]); // attached images as { data: base64, mimeType, name }
+  const [attachments, setAttachments] = useState([]); // attached files: { data, mimeType, name, kind: 'image' | 'file' }
+  const [modes, setModes] = useState([]); // available ACP modes
+  const [currentMode, setCurrentMode] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const isResizing = useRef(false);
@@ -134,7 +136,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     saveSessionMessages(messages);
   }, [messages]);
 
-  // Sync edit mode to server
+  // Sync edit mode to server (also triggers ACP mode switch server-side)
   useEffect(() => {
     fetch(`${API_BASE}/edit-mode`, {
       method: 'POST',
@@ -208,6 +210,18 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       .then(data => {
         if (data.availableModels) setModels(data.availableModels);
         if (data.currentModelId) setCurrentModel(data.currentModelId);
+      })
+      .catch(() => {});
+  }, [backendStatus]);
+
+  // Fetch available modes after connection succeeds
+  useEffect(() => {
+    if (backendStatus !== 'connected') return;
+    fetch(`${API_BASE}/ai/modes`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.availableModes) setModes(data.availableModes);
+        if (data.currentModeId) setCurrentMode(data.currentModeId);
       })
       .catch(() => {});
   }, [backendStatus]);
@@ -316,9 +330,11 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         }
       }
 
-      // Include attached images if any, then clear them
-      const attachedImages = images;
-      if (attachedImages.length > 0) setImages([]);
+      // Split attachments into images and files, then clear
+      const currentAttachments = attachments;
+      if (currentAttachments.length > 0) setAttachments([]);
+      const attachedImages = currentAttachments.filter(a => a.kind === 'image');
+      const attachedFiles = currentAttachments.filter(a => a.kind === 'file');
 
       const res = await fetch(`${API_BASE}/ai/chat`, {
         method: 'POST',
@@ -328,6 +344,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           history,
           context,
           ...(attachedImages.length > 0 ? { images: attachedImages } : {}),
+          ...(attachedFiles.length > 0 ? { files: attachedFiles } : {}),
         }),
         signal: controller.signal,
       });
@@ -507,47 +524,79 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       .catch(() => setCurrentModel(currentModel));
   }
 
-  // Image handling helpers
+  // Attachment handling helpers
+  const TEXT_EXTENSIONS = ['.md', '.json', '.csv', '.xml', '.yaml', '.yml', '.txt', '.log'];
+
   function fileToBase64(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
         // result is "data:<mime>;base64,<data>" — extract the base64 part
         const base64 = reader.result.split(',')[1];
-        resolve({ data: base64, mimeType: file.type, name: file.name });
+        resolve({ data: base64, mimeType: file.type, name: file.name, kind: 'image' });
       };
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
   }
 
-  async function handleImageFiles(files) {
-    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
-    if (imageFiles.length === 0) return;
-    const newImages = await Promise.all(imageFiles.map(fileToBase64));
-    setImages(prev => [...prev, ...newImages]);
+  function fileToText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        resolve({ data: reader.result, mimeType: file.type || 'text/plain', name: file.name, kind: 'file' });
+      };
+      reader.onerror = reject;
+      reader.readAsText(file);
+    });
+  }
+
+  function isTextFile(file) {
+    if (file.type.startsWith('text/')) return true;
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    return TEXT_EXTENSIONS.includes(ext);
+  }
+
+  async function handleFiles(files) {
+    const fileArray = Array.from(files);
+    const results = [];
+    for (const file of fileArray) {
+      if (file.type.startsWith('image/')) {
+        results.push(await fileToBase64(file));
+      } else if (isTextFile(file)) {
+        results.push(await fileToText(file));
+      }
+      // Unsupported types are silently ignored
+    }
+    if (results.length > 0) {
+      setAttachments(prev => [...prev, ...results]);
+    }
   }
 
   function handlePaste(e) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const imageItems = Array.from(items).filter(item => item.type.startsWith('image/'));
-    if (imageItems.length > 0) {
+    const supportedItems = Array.from(items).filter(item =>
+      item.type.startsWith('image/') || item.type.startsWith('text/')
+    );
+    // Only intercept paste for file items (not plain text typing)
+    const fileItems = supportedItems.filter(item => item.kind === 'file');
+    if (fileItems.length > 0) {
       e.preventDefault();
-      const files = imageItems.map(item => item.getAsFile()).filter(Boolean);
-      handleImageFiles(files);
+      const files = fileItems.map(item => item.getAsFile()).filter(Boolean);
+      handleFiles(files);
     }
   }
 
   function handleDrop(e) {
     e.preventDefault();
     if (e.dataTransfer?.files) {
-      handleImageFiles(e.dataTransfer.files);
+      handleFiles(e.dataTransfer.files);
     }
   }
 
-  function removeImage(index) {
-    setImages(prev => prev.filter((_, i) => i !== index));
+  function removeAttachment(index) {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
   }
 
   function handleKeyDown(e) {
@@ -786,19 +835,26 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             </div>
           </div>
         )}
-        {/* Attached image previews */}
-        {images.length > 0 && (
+        {/* Attached file/image previews */}
+        {attachments.length > 0 && (
           <div className="flex gap-2 flex-wrap px-1">
-            {images.map((img, i) => (
+            {attachments.map((att, i) => (
               <div key={i} className="relative group">
-                <img
-                  src={`data:${img.mimeType};base64,${img.data}`}
-                  alt={img.name || 'attached'}
-                  className="h-12 w-12 rounded border border-[#262626] object-cover"
-                />
+                {att.kind === 'image' ? (
+                  <img
+                    src={`data:${att.mimeType};base64,${att.data}`}
+                    alt={att.name || 'attached'}
+                    className="h-12 w-12 rounded border border-[#262626] object-cover"
+                  />
+                ) : (
+                  <div className="flex items-center gap-1.5 h-8 px-2.5 rounded border border-[#262626] bg-[#141414]">
+                    <FileText size={12} className="text-blue-400 shrink-0" />
+                    <span className="text-[10px] text-neutral-400 max-w-[100px] truncate">{att.name}</span>
+                  </div>
+                )}
                 <button
                   type="button"
-                  onClick={() => removeImage(i)}
+                  onClick={() => removeAttachment(i)}
                   className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-600 text-white text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                 >
                   ×
@@ -866,7 +922,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             onPaste={handlePaste}
             onDrop={handleDrop}
             onDragOver={(e) => e.preventDefault()}
-            placeholder={backendStatus === 'error' ? 'AI chat unavailable — editing still works' : images.length > 0 ? 'Describe what to do with the image...' : 'Ask GhostWriter...'}
+            placeholder={backendStatus === 'error' ? 'AI chat unavailable — editing still works' : attachments.some(a => a.kind === 'file') ? 'Describe what to do with the attached files...' : attachments.some(a => a.kind === 'image') ? 'Describe what to do with the image...' : 'Ask GhostWriter...'}
             rows={3}
             disabled={backendStatus === 'error'}
             className={`flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-y max-h-[200px] overflow-y-auto ${
@@ -894,7 +950,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim() || backendStatus === 'error'}
+                disabled={(!input.trim() && attachments.length === 0) || backendStatus === 'error'}
                 className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 title={backendStatus === 'error' ? 'AI chat offline' : 'Send message'}
               >

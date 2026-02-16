@@ -835,6 +835,44 @@ function registerApi(router) {
     }
   });
 
+  // --- AI Mode selection ---
+  router.get('/ai/modes', async (req, res) => {
+    try {
+      const backend = await getBackend(settings);
+      if (backend.getModes) {
+        const modes = backend.getModes();
+        if (modes) {
+          return res.json(modes);
+        }
+        // No session yet — trigger one so modes get cached
+        await backend._ensureSession();
+        const fresh = backend.getModes();
+        return res.json(fresh || { currentModeId: null, availableModes: [] });
+      }
+      res.json({ currentModeId: null, availableModes: [] });
+    } catch (err) {
+      console.error(`[AI Modes ${ts()}] ✗ ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/ai/mode', async (req, res) => {
+    try {
+      const { modeId } = req.body;
+      if (!modeId) return res.status(400).json({ error: 'modeId is required' });
+
+      const backend = await getBackend(settings);
+      if (!backend.setMode) {
+        return res.status(400).json({ error: 'Backend does not support mode switching' });
+      }
+      await backend.setMode(modeId);
+      res.json({ ok: true, modeId });
+    } catch (err) {
+      console.error(`[AI Mode ${ts()}] ✗ ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- Slash commands ---
   router.get('/ai/commands', async (req, res) => {
     try {
@@ -887,6 +925,23 @@ function registerApi(router) {
       if (backend.editModeEnabled !== undefined) {
         backend.editModeEnabled = editModeEnabled;
       }
+      // Also switch ACP mode so Kiro changes its behavior at the source
+      if (backend.setMode && backend.getModes) {
+        const modes = backend.getModes();
+        if (modes && modes.availableModes && modes.availableModes.length > 0) {
+          const targetMode = editModeEnabled
+            ? modes.availableModes.find(m => /agent/i.test(m.id) || /agent/i.test(m.name))
+            : modes.availableModes.find(m => /chat/i.test(m.id) || /chat/i.test(m.name));
+          if (targetMode) {
+            try {
+              await backend.setMode(targetMode.id);
+              console.log(`[EditMode ${ts()}] Switched ACP mode to: ${targetMode.id}`);
+            } catch (modeErr) {
+              console.warn(`[EditMode ${ts()}] Failed to switch ACP mode: ${modeErr.message}`);
+            }
+          }
+        }
+      }
     } catch {}
     res.json({ editMode: editModeEnabled });
   });
@@ -896,7 +951,7 @@ function registerApi(router) {
   });
 
   router.post('/ai/chat', async (req, res) => {
-    const { message, history = [], context, images = [] } = req.body;
+    const { message, history = [], context, images = [], files = [] } = req.body;
     if (!message) return res.status(400).json({ error: 'message is required' });
 
     console.log(`[AI Chat ${ts()}] backend=kiro message="${message.substring(0, 80)}"`);
@@ -981,9 +1036,9 @@ function registerApi(router) {
       const maxHistory = parseInt(settings.ai_max_history || '20', 10);
       const messages = [...history.slice(-maxHistory), { role: 'user', content: message }];
 
-      // Stream (pass image attachments and document resource)
+      // Stream (pass image attachments, document resource, and file attachments)
       let chunkCount = 0;
-      for await (const chunk of backend.chatStream(messages, systemPrompt || undefined, images.length > 0 ? images : undefined, documentResource)) {
+      for await (const chunk of backend.chatStream(messages, systemPrompt || undefined, images.length > 0 ? images : undefined, documentResource, files.length > 0 ? files : undefined)) {
         chunkCount++;
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         if (chunk.type === 'done') {

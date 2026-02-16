@@ -8,6 +8,12 @@ import { getBackend, disposeBackend } from './lib/ai-backends/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Timestamp for log lines — returns HH:MM:SS.mmm
+function ts() {
+  const d = new Date();
+  return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
 // Abbreviate paths for logging — avoid leaking full host/volume paths
 function logPath(p) {
   const home = process.env.HOME || process.env.USERPROFILE || '';
@@ -128,7 +134,7 @@ function setupFileWatcher() {
               try {
                 const currentContent = fs.readFileSync(absPath, 'utf-8');
                 if (currentContent !== cached) {
-                  console.log(`[ReadOnly] Reverting unauthorized edit to ${filename}`);
+                  console.log(`[ReadOnly ${ts()}] Reverting unauthorized edit to ${filename}`);
                   markOwnWrite(absPath);
                   fs.writeFileSync(absPath, cached, 'utf-8');
                   broadcastSSE('edit-reverted', {
@@ -138,7 +144,7 @@ function setupFileWatcher() {
                   return; // Don't broadcast normal file-changed
                 }
               } catch (e) {
-                console.warn('[ReadOnly] Revert failed:', e.message);
+                console.warn(`[ReadOnly ${ts()}] Revert failed:`, e.message);
               }
             }
           }
@@ -748,15 +754,15 @@ function registerApi(router) {
   // --- AI Chat ---
   router.post('/ai/test', async (req, res) => {
     try {
-      console.log('[AI Test] backend=kiro');
+      console.log(`[AI Test ${ts()}] backend=kiro`);
       const backend = await getBackend(settings);
       const start = Date.now();
       const result = await backend.testConnection();
       const latency = Date.now() - start;
-      console.log(`[AI Test] ${result.ok ? '✓' : '✗'} ${result.ok ? result.model : result.error} (${latency}ms)`);
+      console.log(`[AI Test ${ts()}] ${result.ok ? '✓' : '✗'} ${result.ok ? result.model : result.error} (${latency}ms)`);
       res.json({ ...result, latency_ms: latency });
     } catch (err) {
-      console.error(`[AI Test] ✗ exception: ${err.message}`);
+      console.error(`[AI Test ${ts()}] ✗ exception: ${err.message}`);
       res.json({ ok: false, error: err.message });
     }
   });
@@ -766,11 +772,11 @@ function registerApi(router) {
       const backend = await getBackend(settings);
       if (backend.cancel) {
         await backend.cancel();
-        console.log('[AI Cancel] ✓ cancel sent');
+        console.log(`[AI Cancel ${ts()}] ✓ cancel sent`);
       }
       res.json({ ok: true });
     } catch (err) {
-      console.error(`[AI Cancel] ✗ ${err.message}`);
+      console.error(`[AI Cancel ${ts()}] ✗ ${err.message}`);
       res.json({ ok: false, error: err.message });
     }
   });
@@ -780,13 +786,13 @@ function registerApi(router) {
       const backend = await getBackend(settings);
       if (backend.resetSession) {
         await backend.resetSession();
-        console.log('[AI Reset] ✓ session reset');
+        console.log(`[AI Reset ${ts()}] ✓ session reset`);
         res.json({ ok: true });
       } else {
         res.json({ ok: true, note: 'Backend does not support session reset' });
       }
     } catch (err) {
-      console.error(`[AI Reset] ✗ ${err.message}`);
+      console.error(`[AI Reset ${ts()}] ✗ ${err.message}`);
       res.json({ ok: false, error: err.message });
     }
   });
@@ -807,7 +813,7 @@ function registerApi(router) {
       }
       res.json({ currentModelId: null, availableModels: [] });
     } catch (err) {
-      console.error(`[AI Models] ✗ ${err.message}`);
+      console.error(`[AI Models ${ts()}] ✗ ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -824,7 +830,7 @@ function registerApi(router) {
       await backend.setModel(modelId);
       res.json({ ok: true, modelId });
     } catch (err) {
-      console.error(`[AI Model] ✗ ${err.message}`);
+      console.error(`[AI Model ${ts()}] ✗ ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -836,7 +842,7 @@ function registerApi(router) {
       const commands = backend.getCommands ? await backend.getCommands() : [];
       res.json({ commands });
     } catch (err) {
-      console.error(`[AI Commands] ✗ ${err.message}`);
+      console.error(`[AI Commands ${ts()}] ✗ ${err.message}`);
       res.json({ commands: [] });
     }
   });
@@ -853,7 +859,7 @@ function registerApi(router) {
       const result = await backend.executeCommand(command);
       res.json({ ok: true, result });
     } catch (err) {
-      console.error(`[AI Command] ✗ ${err.message}`);
+      console.error(`[AI Command ${ts()}] ✗ ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -874,7 +880,7 @@ function registerApi(router) {
   router.post('/edit-mode', async (req, res) => {
     const { enabled } = req.body;
     editModeEnabled = !!enabled;
-    console.log(`[EditMode] ${editModeEnabled ? 'ENABLED' : 'DISABLED (read-only)'}`);
+    console.log(`[EditMode ${ts()}] ${editModeEnabled ? 'ENABLED' : 'DISABLED (read-only)'}`);
     // Sync to ACP backend so it can auto-approve/reject tool permission requests
     try {
       const backend = await getBackend(settings);
@@ -893,7 +899,7 @@ function registerApi(router) {
     const { message, history = [], context, images = [] } = req.body;
     if (!message) return res.status(400).json({ error: 'message is required' });
 
-    console.log(`[AI Chat] backend=kiro message="${message.substring(0, 80)}"`);
+    console.log(`[AI Chat ${ts()}] backend=kiro message="${message.substring(0, 80)}"`);
 
     // SSE headers
     res.writeHead(200, {
@@ -905,7 +911,7 @@ function registerApi(router) {
 
     try {
       const backend = await getBackend(settings);
-      console.log(`[AI Chat] backend instance: ${backend.getDisplayName()}`);
+      console.log(`[AI Chat ${ts()}] backend instance: ${backend.getDisplayName()}`);
 
       // Build system prompt — appended as additional context, not replacing Kiro's own config
       let systemPrompt = settings.ai_system_prompt || '';
@@ -981,20 +987,20 @@ function registerApi(router) {
         chunkCount++;
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         if (chunk.type === 'done') {
-          console.log(`[AI Chat] ✓ done (${chunkCount} chunks)`);
+          console.log(`[AI Chat ${ts()}] ✓ done (${chunkCount} chunks)`);
           break;
         }
         if (chunk.type === 'error') {
-          console.error(`[AI Chat] ✗ error from backend: ${chunk.text}`);
+          console.error(`[AI Chat ${ts()}] ✗ error from backend: ${chunk.text}`);
           break;
         }
       }
       if (chunkCount === 0) {
-        console.warn('[AI Chat] ✗ backend yielded zero chunks');
+        console.warn(`[AI Chat ${ts()}] ✗ backend yielded zero chunks`);
         res.write(`data: ${JSON.stringify({ type: 'error', text: 'Backend returned no response. Check settings and try again.' })}\n\n`);
       }
     } catch (err) {
-      console.error(`[AI Chat] ✗ exception: ${err.message}`);
+      console.error(`[AI Chat ${ts()}] ✗ exception: ${err.message}`);
       res.write(`data: ${JSON.stringify({ type: 'error', text: err.message })}\n\n`);
     }
 

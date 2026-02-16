@@ -78,12 +78,13 @@ export default function Header({
       <div className="flex items-center gap-3">
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
-          className={`p-1.5 rounded hover:bg-[#1a1a1a] transition-colors ${
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#1a1a1a] transition-colors ${
             sidebarOpen ? 'text-white' : 'text-neutral-500'
           }`}
-          title="Toggle document list"
+          title="Toggle document list (⌘\)"
         >
-          <PanelLeft size={16} />
+          <PanelLeft size={13} />
+          Docs
         </button>
         <h1 className="text-sm font-semibold text-white tracking-tight">
           👻 GhostWriter

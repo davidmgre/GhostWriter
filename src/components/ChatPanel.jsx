@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2, RefreshCw, FileText } from 'lucide-react';
+import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2, RefreshCw, FileText, Plus } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -502,9 +502,25 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   function handleNewChat() {
     if (streaming) handleStop();
     setMessages([]);
+    setConfirmClear(false);
     sessionStorage.removeItem(SESSION_KEY);
-    // Reset Kiro session — creates a fresh context while keeping MCP loaded
-    fetch(`${API_BASE}/ai/reset`, { method: 'POST' }).catch(() => {});
+    // Reset Kiro session — creates a fresh context while keeping MCP loaded.
+    // The model will be re-applied on the next chat message (when the new
+    // session is lazily created), so we just store the preference.
+    const selectedModel = currentModel;
+    fetch(`${API_BASE}/ai/reset`, { method: 'POST' })
+      .then(() => {
+        // Re-apply model selection — this triggers _ensureSession which creates
+        // the new session, then sets the model on it.
+        if (selectedModel && selectedModel !== 'auto') {
+          return fetch(`${API_BASE}/ai/model`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelId: selectedModel }),
+          });
+        }
+      })
+      .catch(() => {});
     inputRef.current?.focus();
   }
 
@@ -637,23 +653,23 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       )}
 
       {/* Header */}
-      <div className="h-12 flex items-center justify-between px-4 border-b border-[#262626] shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-neutral-400">👻 GhostWriter</span>
+      <div className="h-12 flex items-center justify-between px-4 border-b border-[#262626] shrink-0 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0 shrink-1">
+          <span className="text-xs font-medium text-neutral-400 shrink-0">👻</span>
           {backendName && (
             backendStatus === 'error' ? (
               <button
                 type="button"
                 onClick={() => { retryCountRef.current = 0; testConnection(); }}
-                className="flex items-center gap-1 hover:opacity-80 transition-opacity"
+                className="flex items-center gap-1 hover:opacity-80 transition-opacity shrink-0"
                 title={`${backendName} disconnected — click to reconnect`}
               >
                 <Circle size={6} className="text-red-500 fill-red-500" />
-                <span className="text-[10px] text-red-400">{backendName} disconnected</span>
-                <RefreshCw size={10} className="text-red-400 ml-0.5" />
+                <span className="text-[10px] text-red-400">{backendName}</span>
+                <RefreshCw size={10} className="text-red-400" />
               </button>
             ) : (
-              <span className="flex items-center gap-1" title={
+              <span className="flex items-center gap-1 shrink-0" title={
                 backendStatus === 'connected' ? `${backendName} is connected` :
                 `Connecting to ${backendName}...`
               }>
@@ -661,46 +677,60 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
                   backendStatus === 'connected' ? 'text-green-500 fill-green-500' :
                   'text-yellow-500 fill-yellow-500 animate-pulse'
                 } />
-                <span className="text-[10px] text-neutral-600">
-                  {backendStatus === 'connected' ? `${backendName} connected` : 'Connecting...'}
-                </span>
               </span>
             )
           )}
         </div>
-        {/* Model selector */}
-        {models.length > 0 && (
-          <div className="relative" ref={modelDropdownRef}>
-            <button
-              type="button"
-              onClick={() => setModelDropdownOpen(prev => !prev)}
-              className="flex items-center gap-1 px-2 py-1 rounded bg-[#1a1a1a] border border-[#262626] hover:border-[#404040] transition-colors"
-            >
-              <span className="text-[10px] text-neutral-400 max-w-[100px] truncate">
-                {currentModel || 'auto'}
-              </span>
-              <ChevronDown size={10} className={`text-neutral-500 transition-transform ${modelDropdownOpen ? 'rotate-180' : ''}`} />
-            </button>
-            {modelDropdownOpen && (
-              <div className="absolute right-0 top-full mt-1 z-50 bg-[#141414] border border-[#262626] rounded-lg shadow-xl py-1 min-w-[180px] max-h-[240px] overflow-y-auto">
-                {models.map(m => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => handleModelSelect(m.id)}
-                    className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-[#1a1a1a] transition-colors flex items-center justify-between gap-2 ${
-                      m.id === currentModel ? 'text-blue-400' : 'text-neutral-400'
-                    }`}
-                    title={m.description || m.id}
-                  >
-                    <span className="truncate">{m.name || m.id}</span>
-                    {m.id === currentModel && <Check size={10} className="text-blue-400 shrink-0" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {/* Model selector */}
+          {models.length > 0 && (
+            <div className="relative" ref={modelDropdownRef}>
+              <button
+                type="button"
+                onClick={() => setModelDropdownOpen(prev => !prev)}
+                className="flex items-center gap-1 px-1.5 py-1 rounded bg-[#1a1a1a] border border-[#262626] hover:border-[#404040] transition-colors"
+              >
+                <span className="text-[10px] text-neutral-400 max-w-[80px] truncate">
+                  {currentModel || 'auto'}
+                </span>
+                <ChevronDown size={10} className={`text-neutral-500 transition-transform shrink-0 ${modelDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {modelDropdownOpen && (
+                <div className="absolute right-0 top-full mt-1 z-50 bg-[#141414] border border-[#262626] rounded-lg shadow-xl py-1 min-w-[180px] max-h-[240px] overflow-y-auto">
+                  {models.map(m => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => handleModelSelect(m.id)}
+                      className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-[#1a1a1a] transition-colors flex items-center justify-between gap-2 ${
+                        m.id === currentModel ? 'text-blue-400' : 'text-neutral-400'
+                      }`}
+                      title={m.description || m.id}
+                    >
+                      <span className="truncate">{m.name || m.id}</span>
+                      {m.id === currentModel && <Check size={10} className="text-blue-400 shrink-0" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {/* New Chat button */}
+          <button
+            type="button"
+            onClick={() => {
+              if (messages.length === 0) {
+                handleNewChat();
+              } else {
+                setConfirmClear(true);
+              }
+            }}
+            className="p-1.5 rounded bg-[#1a1a1a] border border-[#262626] hover:border-[#404040] text-neutral-400 hover:text-neutral-200 transition-colors"
+            title="New chat"
+          >
+            <Plus size={13} />
+          </button>
+        </div>
       </div>
       {/* Context usage bar */}
       {contextUsage && contextUsage.percentage != null && (
@@ -810,10 +840,10 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
 
       {/* Input */}
       <form onSubmit={sendMessage} className="p-3 border-t border-[#1a1a1a] space-y-2">
-        {/* Clear confirmation bar */}
+        {/* New chat confirmation bar */}
         {confirmClear && (
           <div className="flex items-center justify-between bg-red-900/30 border border-red-500/30 rounded-lg px-3 py-2">
-            <span className="text-xs text-red-300">Clear chat history?</span>
+            <span className="text-xs text-red-300">Start a new chat? Current history will be cleared.</span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -824,13 +854,10 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  handleNewChat();
-                  setConfirmClear(false);
-                }}
+                onClick={handleNewChat}
                 className="text-[11px] bg-red-600 hover:bg-red-500 text-white px-2.5 py-1 rounded transition-colors"
               >
-                Clear
+                New Chat
               </button>
             </div>
           </div>
@@ -932,13 +959,16 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           <div className="flex flex-col gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={() => setConfirmClear(true)}
+              onClick={() => {
+                if (messages.length === 0) handleNewChat();
+                else setConfirmClear(true);
+              }}
               className="p-2 rounded-lg bg-red-900/60 hover:bg-red-800/80 transition-colors"
               title="Clear chat"
             >
               <Eraser size={14} className="text-red-300" />
             </button>
-            {streaming ? (
+            {streaming && (
               <button
                 type="button"
                 onClick={handleStop}
@@ -947,16 +977,15 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               >
                 <Square size={14} className="text-white" />
               </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={(!input.trim() && attachments.length === 0) || backendStatus === 'error'}
-                className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                title={backendStatus === 'error' ? 'AI chat offline' : 'Send message'}
-              >
-                <Send size={14} className="text-white" />
-              </button>
             )}
+            <button
+              type="submit"
+              disabled={(!input.trim() && attachments.length === 0) || backendStatus === 'error' || streaming}
+              className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title={streaming ? 'Wait for response to finish' : backendStatus === 'error' ? 'AI chat offline' : 'Send message'}
+            >
+              <Send size={14} className="text-white" />
+            </button>
           </div>
         </div>
         <div className="flex items-center justify-between">
@@ -965,17 +994,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           </span>
           <button
             type="button"
-            onClick={() => {
-              setEditMode(prev => {
-                const newMode = !prev;
-                // Auto-send only when enabling edit mode with an existing conversation
-                // Delay to let the Kiro backend settle between requests
-                if (newMode && messages.length > 0 && !streaming) {
-                  setTimeout(() => doSend('AI Edit mode enabled. Please proceed with the changes.', true), 2000);
-                }
-                return newMode;
-              });
-            }}
+            onClick={() => setEditMode(prev => !prev)}
             className={`relative flex items-center h-6 rounded-full text-[10px] font-medium transition-colors cursor-pointer ${
               editMode
                 ? 'bg-amber-500/20 text-amber-300'

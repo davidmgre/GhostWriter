@@ -505,12 +505,16 @@ ${previewEl.innerHTML}
     URL.revokeObjectURL(url);
   }, [currentDoc]);
 
-  // Keyboard shortcut for save
+  // Keyboard shortcuts (⌘S save, ⌘\ toggle sidebar)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         handleSave();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+        e.preventDefault();
+        setSidebarOpen(prev => !prev);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -646,7 +650,10 @@ ${previewEl.innerHTML}
       ) : (
         /* Desktop Layout */
         <div className="flex-1 flex overflow-hidden">
-          {sidebarOpen && (
+          {/* Sidebar wrapper with slide animation */}
+          <div className={`shrink-0 overflow-hidden transition-all duration-200 ${
+            sidebarOpen ? 'w-56 lg:w-64' : 'w-0'
+          }`}>
             <DocSidebar
               documents={documents}
               currentDoc={currentDoc}
@@ -655,7 +662,7 @@ ${previewEl.innerHTML}
               onOpenFolder={openFolder}
               onRename={renameDoc}
             />
-          )}
+          </div>
 
           <div className="flex-1 flex overflow-hidden min-w-0">
             {(viewMode === 'split' || viewMode === 'edit') && (

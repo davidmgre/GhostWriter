@@ -169,7 +169,7 @@ export default function DocSidebar({ documents, currentDoc, onSelect, onCreate, 
   }
 
   return (
-    <div className="w-56 lg:w-64 border-r border-[#262626] flex flex-col bg-[#0a0a0a] shrink-0">
+    <div className="w-56 lg:w-64 min-w-[14rem] lg:min-w-[16rem] border-r border-[#262626] flex flex-col bg-[#0a0a0a] shrink-0">
       {/* Header */}
       <div className="h-12 flex items-center justify-between px-3 border-b border-[#262626] shrink-0">
         <div className="text-xs font-medium text-neutral-400 tracking-wide">DOCUMENTS</div>

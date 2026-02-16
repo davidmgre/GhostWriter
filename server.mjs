@@ -24,6 +24,24 @@ function logPath(p) {
   return p;
 }
 
+// --- Path traversal protection ---
+// Resolves userInput against base and ensures the result stays inside base.
+// Returns the resolved absolute path, or null if the input escapes (e.g. "../").
+function safePath(base, userInput) {
+  const resolved = path.resolve(base, userInput);
+  // The resolved path must either equal the base or be a child of it.
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+    return null;
+  }
+  return resolved;
+}
+
+// Validate that an already-resolved absolute path is inside the given base.
+function isInsideDir(base, absPath) {
+  const resolved = path.resolve(absPath);
+  return resolved === base || resolved.startsWith(base + path.sep);
+}
+
 const app = express();
 const PORT = 3888;
 
@@ -501,6 +519,9 @@ function registerApi(router) {
     try {
       const id = decodeURIComponent(req.params.id);
       const docPath = getDocPath(id);
+      if (!isInsideDir(getDocsDir(), docPath)) {
+        return res.status(400).json({ error: 'Invalid document path' });
+      }
 
       const content = fs.existsSync(docPath)
         ? fs.readFileSync(docPath, 'utf-8')
@@ -522,18 +543,27 @@ function registerApi(router) {
       if (isFileId(id)) {
         // Loose file — just write directly, no versions
         const filePath = getDocPath(id);
+        if (!isInsideDir(getDocsDir(), filePath)) {
+          return res.status(400).json({ error: 'Invalid document path' });
+        }
         markOwnWrite(filePath);
         fs.writeFileSync(filePath, content, 'utf-8');
         lastKnownContent.set(id, content);
         res.json({ success: true, timestamp: new Date().toISOString() });
       } else {
         // Subfolder project — write + version snapshot
-        const docDir = path.join(getDocsDir(), id);
+        const docDir = safePath(getDocsDir(), id);
+        if (!docDir) {
+          return res.status(400).json({ error: 'Invalid document path' });
+        }
         if (!fs.existsSync(docDir)) {
           fs.mkdirSync(docDir, { recursive: true });
         }
 
         const docPath = getDocPath(id);
+        if (!isInsideDir(getDocsDir(), docPath)) {
+          return res.status(400).json({ error: 'Invalid document path' });
+        }
         markOwnWrite(docPath);
         fs.writeFileSync(docPath, content, 'utf-8');
         lastKnownContent.set(id, content);
@@ -551,7 +581,10 @@ function registerApi(router) {
     try {
       const { slug } = req.body;
       const filename = (slug || 'untitled') + '.md';
-      const filePath = path.join(getDocsDir(), filename);
+      const filePath = safePath(getDocsDir(), filename);
+      if (!filePath) {
+        return res.status(400).json({ error: 'Invalid filename' });
+      }
 
       if (fs.existsSync(filePath)) {
         return res.status(400).json({ error: 'A file with that name already exists' });
@@ -591,8 +624,11 @@ function registerApi(router) {
         if (oldFilename === newFilename) {
           return res.json({ newId: id });
         }
-        const oldPath = path.join(dir, oldFilename);
-        const newPath = path.join(dir, newFilename);
+        const oldPath = safePath(dir, oldFilename);
+        const newPath = safePath(dir, newFilename);
+        if (!oldPath || !newPath) {
+          return res.status(400).json({ error: 'Invalid document path' });
+        }
         if (fs.existsSync(newPath)) {
           return res.status(400).json({ error: 'A file with that name already exists' });
         }
@@ -613,8 +649,11 @@ function registerApi(router) {
         if (id === newFolderId) {
           return res.json({ newId: id });
         }
-        const oldDir = path.join(dir, id);
-        const newDir = path.join(dir, newFolderId);
+        const oldDir = safePath(dir, id);
+        const newDir = safePath(dir, newFolderId);
+        if (!oldDir || !newDir) {
+          return res.status(400).json({ error: 'Invalid document path' });
+        }
         if (fs.existsSync(newDir)) {
           return res.status(400).json({ error: 'A document with that name already exists' });
         }
@@ -639,7 +678,10 @@ function registerApi(router) {
       const id = decodeURIComponent(req.params.id);
       const versionsDir = getVersionsDir(id);
 
-      if (!versionsDir || !fs.existsSync(versionsDir)) {
+      if (!versionsDir || !isInsideDir(getDocsDir(), versionsDir)) {
+        return res.json({ versions: [] });
+      }
+      if (!fs.existsSync(versionsDir)) {
         return res.json({ versions: [] });
       }
 
@@ -664,9 +706,12 @@ function registerApi(router) {
     try {
       const id = decodeURIComponent(req.params.id);
       const versionsDir = getVersionsDir(id);
-      if (!versionsDir) return res.status(404).json({ error: 'No versions for this file type' });
+      if (!versionsDir || !isInsideDir(getDocsDir(), versionsDir)) {
+        return res.status(404).json({ error: 'No versions for this file type' });
+      }
 
-      const versionPath = path.join(versionsDir, `${req.params.timestamp}.md`);
+      const versionPath = safePath(versionsDir, `${req.params.timestamp}.md`);
+      if (!versionPath) return res.status(400).json({ error: 'Invalid version path' });
       if (!fs.existsSync(versionPath)) return res.status(404).json({ error: 'Version not found' });
 
       const content = fs.readFileSync(versionPath, 'utf-8');
@@ -681,13 +726,19 @@ function registerApi(router) {
     try {
       const id = decodeURIComponent(req.params.id);
       const versionsDir = getVersionsDir(id);
-      if (!versionsDir) return res.status(400).json({ error: 'No versions for this file type' });
+      if (!versionsDir || !isInsideDir(getDocsDir(), versionsDir)) {
+        return res.status(400).json({ error: 'No versions for this file type' });
+      }
 
-      const versionPath = path.join(versionsDir, `${req.params.timestamp}.md`);
+      const versionPath = safePath(versionsDir, `${req.params.timestamp}.md`);
+      if (!versionPath) return res.status(400).json({ error: 'Invalid version path' });
       if (!fs.existsSync(versionPath)) return res.status(404).json({ error: 'Version not found' });
 
       const content = fs.readFileSync(versionPath, 'utf-8');
       const docPath = getDocPath(id);
+      if (!isInsideDir(getDocsDir(), docPath)) {
+        return res.status(400).json({ error: 'Invalid document path' });
+      }
 
       // Snapshot current before restoring
       const currentContent = fs.readFileSync(docPath, 'utf-8');
@@ -707,6 +758,11 @@ function registerApi(router) {
     try {
       const id = decodeURIComponent(req.params.id);
       if (isFileId(id)) return res.json({ deleted: 0, remaining: 0, message: 'No versions for loose files' });
+
+      const versionsDir = getVersionsDir(id);
+      if (!versionsDir || !isInsideDir(getDocsDir(), versionsDir)) {
+        return res.status(400).json({ error: 'Invalid document path' });
+      }
 
       const result = cleanupVersions(id);
       res.json(result);
@@ -744,6 +800,9 @@ function registerApi(router) {
       if (!id) return res.status(400).json({ error: 'Document id required' });
 
       const docPath = getDocPath(id);
+      if (!isInsideDir(getDocsDir(), docPath)) {
+        return res.status(400).json({ error: 'Invalid document path' });
+      }
       const content = fs.existsSync(docPath) ? fs.readFileSync(docPath, 'utf-8') : '';
       res.json({ markdown: content });
     } catch (err) {

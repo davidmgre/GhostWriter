@@ -127,11 +127,64 @@ function App() {
   const lastVersionContent = useRef('');
   const lastSavedContent = useRef('');
   const currentDocRef = useRef(null);
+  const documentsRef = useRef([]);
+  const contentRef = useRef('');
 
-  // Keep ref in sync for SSE handler
+  // Keep refs in sync for handlers that run inside stale closures
   useEffect(() => {
     currentDocRef.current = currentDoc;
   }, [currentDoc]);
+
+  useEffect(() => {
+    documentsRef.current = documents;
+  }, [documents]);
+
+  useEffect(() => {
+    contentRef.current = content;
+  }, [content]);
+
+  // Load documents — uses refs so it's safe to call from stale closures (e.g. SSE)
+  const loadDocuments = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/documents`);
+      const data = await res.json();
+      const list = data.documents || [];
+      setDocuments(list);
+
+      const current = currentDocRef.current;
+      if (current) {
+        const updated = list.find(n => n.id === current.id);
+        if (updated) setCurrentDoc(updated);
+      }
+
+      return list;
+    } catch (err) {
+      console.error('Failed to load documents:', err);
+      return [];
+    }
+  }, []);
+
+  // Select document — uses documentsRef so it's safe from stale closures
+  const selectDoc = useCallback(async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}`);
+      const data = await res.json();
+      setContent(data.content);
+      lastVersionContent.current = data.content;
+      lastSavedContent.current = data.content;
+
+      const doc = documentsRef.current.find(n => n.id === id);
+      setCurrentDoc(doc || { id, title: 'Loading...', date: '', versionCount: 0, type: data.type || 'project' });
+      setSaveStatus('saved');
+      setVersionHistoryOpen(false);
+
+      const updated = await loadDocuments();
+      const found = updated.find(n => n.id === id);
+      if (found) setCurrentDoc(found);
+    } catch (err) {
+      console.error('Failed to load document:', err);
+    }
+  }, [loadDocuments]);
 
   // --- SSE: Live reload on external file changes ---
   useEffect(() => {
@@ -178,20 +231,21 @@ function App() {
       if (eventSource) eventSource.close();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, []);
+  }, [loadDocuments]);
 
   // Load documents on mount
   useEffect(() => {
     loadDocuments();
-  }, []);
+  }, [loadDocuments]);
 
-  // Auto-save with debounce
+  // Auto-save with debounce — uses currentDocRef so it's stable and safe from stale closures
   const saveContent = useCallback(async (text, createVersion = false) => {
-    if (!currentDoc) return;
+    const current = currentDocRef.current;
+    if (!current) return;
 
     try {
       setSaveStatus('saving');
-      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(currentDoc.id)}`, {
+      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(current.id)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text }),
@@ -210,7 +264,7 @@ function App() {
       console.error('Failed to save:', err);
       setSaveStatus('error');
     }
-  }, [currentDoc]);
+  }, [loadDocuments]);
 
   const handleContentChange = useCallback((newContent) => {
     setContent(newContent);
@@ -222,94 +276,35 @@ function App() {
     }, 1500);
   }, [saveContent]);
 
-  // Auto-version snapshot every 5 minutes
+  // Auto-version snapshot every 5 minutes — uses contentRef to avoid resetting interval on every keystroke
   useEffect(() => {
     versionSnapshotTimer.current = setInterval(() => {
-      if (content && content !== lastVersionContent.current) {
-        saveContent(content, true);
+      const currentContent = contentRef.current;
+      if (currentContent && currentContent !== lastVersionContent.current) {
+        saveContent(currentContent, true);
       }
     }, 5 * 60 * 1000);
 
     return () => {
       if (versionSnapshotTimer.current) clearInterval(versionSnapshotTimer.current);
     };
-  }, [content, saveContent]);
+  }, [saveContent]);
 
-  // Manual save (Cmd+S)
+  // Manual save (Cmd+S) — uses contentRef to avoid re-registering keyboard handler on every keystroke
   const handleSave = useCallback(() => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    saveContent(content, true);
-  }, [content, saveContent]);
-
-  // Load documents
-  async function loadDocuments() {
-    try {
-      const res = await fetch(`${API_BASE}/documents`);
-      const data = await res.json();
-      const list = data.documents || [];
-      setDocuments(list);
-
-      if (currentDoc) {
-        const updated = list.find(n => n.id === currentDoc.id);
-        if (updated) setCurrentDoc(updated);
-      }
-
-      return list;
-    } catch (err) {
-      console.error('Failed to load documents:', err);
-      return [];
-    }
-  }
-
-  // Select document
-  async function selectDoc(id) {
-    try {
-      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}`);
-      const data = await res.json();
-      setContent(data.content);
-      lastVersionContent.current = data.content;
-      lastSavedContent.current = data.content;
-
-      const doc = documents.find(n => n.id === id);
-      setCurrentDoc(doc || { id, title: 'Loading...', date: '', versionCount: 0, type: data.type || 'project' });
-      setSaveStatus('saved');
-      setVersionHistoryOpen(false);
-
-      const updated = await loadDocuments();
-      const found = updated.find(n => n.id === id);
-      if (found) setCurrentDoc(found);
-    } catch (err) {
-      console.error('Failed to load document:', err);
-    }
-  }
+    saveContent(contentRef.current, true);
+  }, [saveContent]);
 
   // Auto-select first document
   useEffect(() => {
-    if (documents.length > 0 && !currentDoc) {
+    if (documents.length > 0 && !currentDocRef.current) {
       selectDoc(documents[0].id);
     }
-  }, [documents]);
-
-  // Open folder or file via native macOS picker, with web fallback
-  async function openFolder() {
-    try {
-      const res = await fetch(`${API_BASE}/pick-folder`, { method: 'POST' });
-      const data = await res.json();
-
-      if (data.unsupported) {
-        setFileBrowserOpen(true);
-        return;
-      }
-
-      if (data.cancelled || !data.path) return;
-      await applyFolderSelection(data);
-    } catch (err) {
-      console.error('Failed to open folder:', err);
-    }
-  }
+  }, [documents, selectDoc]);
 
   // Shared handler for both native picker and web file browser results
-  async function applyFolderSelection(data) {
+  const applyFolderSelection = useCallback(async (data) => {
     try {
       // Save the new docsDir (parent dir if a file was picked)
       await fetch(`${API_BASE}/settings`, {
@@ -332,10 +327,28 @@ function App() {
     } catch (err) {
       console.error('Failed to apply folder selection:', err);
     }
-  }
+  }, [loadDocuments, selectDoc]);
 
-  // Rename document
-  async function renameDoc(id, newName) {
+  // Open folder or file via native macOS picker, with web fallback
+  const openFolder = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/pick-folder`, { method: 'POST' });
+      const data = await res.json();
+
+      if (data.unsupported) {
+        setFileBrowserOpen(true);
+        return;
+      }
+
+      if (data.cancelled || !data.path) return;
+      await applyFolderSelection(data);
+    } catch (err) {
+      console.error('Failed to open folder:', err);
+    }
+  }, [applyFolderSelection]);
+
+  // Rename document — uses currentDocRef so it's safe from stale closures
+  const renameDoc = useCallback(async (id, newName) => {
     try {
       const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}/rename`, {
         method: 'POST',
@@ -349,16 +362,16 @@ function App() {
       }
       // Reload documents and re-select if the renamed doc was current
       const docs = await loadDocuments();
-      if (currentDoc?.id === id && data.newId) {
+      if (currentDocRef.current?.id === id && data.newId) {
         selectDoc(data.newId);
       }
     } catch (err) {
       console.error('Failed to rename document:', err);
     }
-  }
+  }, [loadDocuments, selectDoc]);
 
   // Create new document
-  async function createDoc(slug) {
+  const createDoc = useCallback(async (slug) => {
     try {
       const res = await fetch(`${API_BASE}/documents`, {
         method: 'POST',
@@ -371,7 +384,7 @@ function App() {
     } catch (err) {
       console.error('Failed to create document:', err);
     }
-  }
+  }, [loadDocuments, selectDoc]);
 
   // --- Copy helpers ---
   function showCopyFeedback() {
@@ -407,28 +420,29 @@ function App() {
     }
   }, []);
 
-  // Copy as Slack mrkdwn
+  // Copy as Slack mrkdwn — uses contentRef to avoid re-creation on every keystroke
   const handleCopySlack = useCallback(async () => {
-    const slack = markdownToSlack(content);
+    const slack = markdownToSlack(contentRef.current);
     try {
       await navigator.clipboard.writeText(slack);
       showCopyFeedback();
     } catch (err) {
       console.error('Slack copy failed:', err);
     }
-  }, [content]);
+  }, []);
 
-  // Copy raw HTML source
+  // Copy raw HTML source — uses currentDocRef to avoid re-creation when doc changes
   const handleCopyHTML = useCallback(async () => {
     const previewEl = document.querySelector('.markdown-preview');
     if (!previewEl) return;
 
+    const docTitle = currentDocRef.current?.title || 'Document';
     const htmlContent = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${currentDoc?.title || 'Document'}</title>
+<title>${docTitle}</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 680px; margin: 0 auto; padding: 20px; color: #1a1a1a; line-height: 1.6; }
   h1 { border-bottom: 2px solid #e5e5e5; padding-bottom: 0.3em; }
@@ -458,11 +472,12 @@ ${previewEl.innerHTML}
     } catch (err) {
       console.error('HTML copy failed:', err);
     }
-  }, [currentDoc]);
+  }, []);
 
-  // Download HTML file
+  // Download HTML file — uses currentDocRef to avoid re-creation when doc changes
   const handleDownloadHTML = useCallback(async () => {
-    if (!currentDoc) return;
+    const current = currentDocRef.current;
+    if (!current) return;
 
     const previewEl = document.querySelector('.markdown-preview');
     if (!previewEl) return;
@@ -472,7 +487,7 @@ ${previewEl.innerHTML}
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${currentDoc.title || 'Document'}</title>
+<title>${current.title || 'Document'}</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 680px; margin: 0 auto; padding: 20px; color: #1a1a1a; line-height: 1.6; }
   h1 { border-bottom: 2px solid #e5e5e5; padding-bottom: 0.3em; }
@@ -500,10 +515,10 @@ ${previewEl.innerHTML}
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${currentDoc.id}.html`;
+    a.download = `${current.id}.html`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [currentDoc]);
+  }, []);
 
   // Keyboard shortcuts (⌘S save, ⌘\ toggle sidebar)
   useEffect(() => {

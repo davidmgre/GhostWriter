@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, User, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Wrench, ImagePlus, Slash, Loader2, RefreshCw, FileText, Plus } from 'lucide-react';
+import { Send, Ghost, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Slash, Loader2, RefreshCw, FileText, Plus } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -99,8 +99,6 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const [slashCommands, setSlashCommands] = useState([]); // available slash commands
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [attachments, setAttachments] = useState([]); // attached files: { data, mimeType, name, kind: 'image' | 'file' }
-  const [modes, setModes] = useState([]); // available ACP modes
-  const [currentMode, setCurrentMode] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const isResizing = useRef(false);
@@ -210,18 +208,6 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       .then(data => {
         if (data.availableModels) setModels(data.availableModels);
         if (data.currentModelId) setCurrentModel(data.currentModelId);
-      })
-      .catch(() => {});
-  }, [backendStatus]);
-
-  // Fetch available modes after connection succeeds
-  useEffect(() => {
-    if (backendStatus !== 'connected') return;
-    fetch(`${API_BASE}/ai/modes`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.availableModes) setModes(data.availableModes);
-        if (data.currentModeId) setCurrentMode(data.currentModeId);
       })
       .catch(() => {});
   }, [backendStatus]);

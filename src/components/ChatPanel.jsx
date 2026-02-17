@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Slash, Loader2, RefreshCw, FileText, Plus, Copy } from 'lucide-react';
+import { Send, Ghost, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Slash, Loader2, RefreshCw, FileText, Plus, Copy, RotateCcw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -121,6 +121,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const [slashCommands, setSlashCommands] = useState([]); // available slash commands
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [attachments, setAttachments] = useState([]); // attached files: { data, mimeType, name, kind: 'image' | 'file' }
+  const [fileWarning, setFileWarning] = useState(null); // brief warning for unsupported file types
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
   const userScrolledUp = useRef(false);
@@ -132,6 +133,9 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const slashMenuRef = useRef(null);
   const retryTimerRef = useRef(null);
   const retryCountRef = useRef(0);
+  const inputHistory = useRef([]); // previously sent messages
+  const historyIndex = useRef(-1); // -1 = not navigating
+  const savedInput = useRef(''); // unsent input preserved while navigating
 
   // Reusable connection test — resolves to 'connected' or 'error'
   const testConnection = useCallback(() => {
@@ -325,6 +329,14 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
 
     const userMsg = { id: nextId(), role: 'user', content: text, timestamp: new Date().toISOString() };
     const assistantMsg = { id: nextId(), role: 'assistant', content: '', timestamp: new Date().toISOString() };
+
+    // Track input history (deduplicate consecutive duplicates, cap at 50)
+    if (inputHistory.current[inputHistory.current.length - 1] !== text) {
+      inputHistory.current.push(text);
+      if (inputHistory.current.length > 50) inputHistory.current.shift();
+    }
+    historyIndex.current = -1;
+    savedInput.current = '';
 
     setMessages(prev => [...prev, userMsg, assistantMsg]);
     setInput('');
@@ -600,16 +612,23 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   async function handleFiles(files) {
     const fileArray = Array.from(files);
     const results = [];
+    const skipped = [];
     for (const file of fileArray) {
       if (file.type.startsWith('image/')) {
         results.push(await fileToBase64(file));
       } else if (isTextFile(file)) {
         results.push(await fileToText(file));
+      } else {
+        skipped.push(file.name);
       }
-      // Unsupported types are silently ignored
     }
     if (results.length > 0) {
       setAttachments(prev => [...prev, ...results]);
+    }
+    if (skipped.length > 0) {
+      const names = skipped.length <= 2 ? skipped.join(', ') : `${skipped.length} files`;
+      setFileWarning(`Unsupported: ${names}. Try images, .txt, .md, .json, .csv`);
+      setTimeout(() => setFileWarning(null), 4000);
     }
   }
 
@@ -643,6 +662,28 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage(e);
+      return;
+    }
+    // Input history navigation — only when cursor is at position 0 (start of input)
+    const el = e.target;
+    if (e.key === 'ArrowUp' && el.selectionStart === 0 && el.selectionEnd === 0 && inputHistory.current.length > 0) {
+      e.preventDefault();
+      if (historyIndex.current === -1) {
+        savedInput.current = input;
+        historyIndex.current = inputHistory.current.length - 1;
+      } else if (historyIndex.current > 0) {
+        historyIndex.current--;
+      }
+      setInput(inputHistory.current[historyIndex.current]);
+    } else if (e.key === 'ArrowDown' && historyIndex.current !== -1) {
+      e.preventDefault();
+      if (historyIndex.current < inputHistory.current.length - 1) {
+        historyIndex.current++;
+        setInput(inputHistory.current[historyIndex.current]);
+      } else {
+        historyIndex.current = -1;
+        setInput(savedInput.current);
+      }
     }
   }
 
@@ -766,7 +807,10 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             <Ghost size={24} className="mx-auto mb-2 text-neutral-700" />
             <p>No messages yet.</p>
             <p className="mt-1 text-neutral-700">
-              Ask GhostWriter about your document.
+              Ask GhostWriter about your document, or type <span className="text-neutral-500 font-mono">/</span> for commands.
+            </p>
+            <p className="mt-0.5 text-neutral-700 text-[10px]">
+              Drop images or text files to attach them.
             </p>
           </div>
         )}
@@ -893,6 +937,31 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
                 </button>
               </div>
             ))}
+          </div>
+        )}
+        {/* Retry banner — shown when last message is an error */}
+        {!streaming && messages.length >= 2 && messages[messages.length - 1]?.role === 'error' && (() => {
+          const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+          return lastUserMsg ? (
+            <button
+              type="button"
+              onClick={() => {
+                // Remove the error message, then resend
+                setMessages(prev => prev.filter(m => m.id !== messages[messages.length - 1].id));
+                doSend(lastUserMsg.content);
+              }}
+              className="flex items-center gap-2 bg-red-900/20 border border-red-900/40 rounded-lg px-3 py-1.5 text-[11px] text-red-300 hover:bg-red-900/30 transition-colors"
+            >
+              <RotateCcw size={11} />
+              Retry last message
+            </button>
+          ) : null;
+        })()}
+        {/* File type warning */}
+        {fileWarning && (
+          <div className="flex items-center gap-2 bg-amber-900/20 border border-amber-900/40 rounded-lg px-3 py-1.5 text-[11px] text-amber-300">
+            <AlertCircle size={11} className="shrink-0" />
+            {fileWarning}
           </div>
         )}
         {/* Slash command autocomplete */}

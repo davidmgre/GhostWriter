@@ -754,6 +754,8 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
                 type="button"
                 onClick={() => setModelDropdownOpen(prev => !prev)}
                 className="flex items-center gap-1 px-1.5 py-1 rounded bg-[#1a1a1a] border border-[#262626] hover:border-[#404040] transition-colors"
+                aria-label="Select AI model"
+                aria-expanded={modelDropdownOpen}
               >
                 <span className="text-[10px] text-neutral-400 max-w-[80px] truncate">
                   {currentModel || 'auto'}
@@ -792,6 +794,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             }}
             className="p-1.5 rounded bg-[#1a1a1a] border border-[#262626] hover:border-[#404040] text-neutral-400 hover:text-neutral-200 transition-colors"
             title="New chat"
+            aria-label="New chat"
           >
             <Plus size={13} />
           </button>
@@ -1024,6 +1027,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
             onDrop={handleDrop}
             onDragOver={(e) => e.preventDefault()}
             placeholder={backendStatus === 'error' ? 'AI chat unavailable — editing still works' : attachments.some(a => a.kind === 'file') ? 'Describe what to do with the attached files...' : attachments.some(a => a.kind === 'image') ? 'Describe what to do with the image...' : 'Ask GhostWriter...'}
+            aria-label="Chat message input"
             rows={3}
             disabled={backendStatus === 'error'}
             className={`flex-1 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-sm placeholder-neutral-600 focus:outline-none focus:border-[#404040] transition-colors min-w-0 resize-y max-h-[200px] overflow-y-auto ${
@@ -1039,6 +1043,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               }}
               className="p-2 rounded-lg bg-red-900/60 hover:bg-red-800/80 transition-colors"
               title="Clear chat"
+              aria-label="Clear chat"
             >
               <Eraser size={14} className="text-red-300" />
             </button>
@@ -1048,6 +1053,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
                 onClick={handleStop}
                 className="p-2 rounded-lg bg-red-600 hover:bg-red-500 transition-colors"
                 title="Stop generating"
+                aria-label="Stop generating"
               >
                 <Square size={14} className="text-white" />
               </button>
@@ -1057,6 +1063,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               disabled={(!input.trim() && attachments.length === 0) || backendStatus === 'error' || streaming}
               className="p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               title={streaming ? 'Wait for response to finish' : backendStatus === 'error' ? 'AI chat offline' : 'Send message'}
+              aria-label="Send message"
             >
               <Send size={14} className="text-white" />
             </button>
@@ -1069,6 +1076,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           <button
             type="button"
             onClick={() => setEditMode(prev => !prev)}
+            aria-label={editMode ? 'Switch to read mode' : 'Switch to edit mode'}
             className={`relative flex items-center h-6 rounded-full text-[10px] font-medium transition-colors cursor-pointer ${
               editMode
                 ? 'bg-amber-500/20 text-amber-300'
@@ -1088,6 +1096,9 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               AI Edit
             </span>
           </button>
+        </div>
+        <div className="text-[9px] text-neutral-700 text-center select-none">
+          Enter to send · Shift+Enter for newline · ↑↓ for history · / for commands
         </div>
       </form>
     </div>

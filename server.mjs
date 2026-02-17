@@ -1197,6 +1197,11 @@ const server = app.listen(PORT, 'localhost', () => {
   console.log(`GhostWriter running at http://localhost:${PORT}`);
   console.log(`Documents directory: ${logPath(getDocsDir())}`);
   setupFileWatcher();
+
+  // Warm up Kiro session eagerly — spawns the kiro-cli process, creates a
+  // session, and waits for MCP servers to initialize. This eliminates the
+  // cold-start stall when the first chat message arrives.
+  getBackend(settings).then(backend => backend._ensureSession()).catch(() => {});
 });
 
 server.on('error', (err) => {

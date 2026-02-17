@@ -270,7 +270,10 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     fetch(`${API_BASE}/ai/context-usage`)
       .then(r => r.json())
       .then(data => {
-        if (data.usage && data.usage.percentage != null) setContextUsage(data.usage);
+        if (data.usage) {
+          const pct = data.usage.percentage ?? data.usage.contextUsagePercentage;
+          if (pct != null) setContextUsage({ percentage: pct });
+        }
         if (data.compacting !== undefined) setCompacting(data.compacting);
       })
       .catch(() => {});

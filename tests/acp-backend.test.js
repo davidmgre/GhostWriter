@@ -51,6 +51,16 @@ function injectMockSession(backend, proc, sessionId = 'test-session-123') {
     backend._buffer += chunk.toString();
     backend._processBuffer();
   });
+
+  // Register persistent metadata listener (mirrors what _initialize does)
+  backend._notifications.push((msg) => {
+    if (msg.method === 'kiro.dev/metadata') {
+      const pct = msg.params?.contextUsagePercentage;
+      if (pct != null) {
+        backend._contextUsage = { percentage: pct };
+      }
+    }
+  });
 }
 
 /** Simulate Kiro sending a JSON-RPC response */
@@ -340,6 +350,108 @@ describe('ACPBackend', () => {
       await streamPromise;
 
       expect(backend.getContextUsage()).toEqual({ percentage: 78 });
+    });
+  });
+
+  // --------------------------------------------------
+  // P2: kiro.dev/metadata (real-time context usage)
+  // --------------------------------------------------
+  describe('kiro.dev/metadata notifications', () => {
+    it('captures context usage from metadata notification during streaming', async () => {
+      const chunks = [];
+      const streamPromise = (async () => {
+        for await (const chunk of backend.chatStream(
+          [{ role: 'user', content: 'hi' }], null
+        )) {
+          chunks.push(chunk);
+          if (chunk.type === 'done' || chunk.type === 'error') break;
+        }
+      })();
+
+      await waitForStdin(proc);
+      const msg = getLastSentMessage(proc);
+
+      // Simulate kiro.dev/metadata notification mid-stream
+      sendNotification(proc, 'kiro.dev/metadata', { contextUsagePercentage: 42.5 });
+      await new Promise(r => setTimeout(r, 10));
+
+      // Backend state should be updated
+      expect(backend.getContextUsage()).toEqual({ percentage: 42.5 });
+
+      // SSE stream should contain a context_usage event
+      const usageChunk = chunks.find(c => c.type === 'context_usage');
+      expect(usageChunk).toBeTruthy();
+      expect(usageChunk.percentage).toBe(42.5);
+
+      sendResponse(proc, msg.id, { stopReason: 'end_turn' });
+      await streamPromise;
+    });
+
+    it('updates context usage progressively as metadata arrives', async () => {
+      const chunks = [];
+      const streamPromise = (async () => {
+        for await (const chunk of backend.chatStream(
+          [{ role: 'user', content: 'hi' }], null
+        )) {
+          chunks.push(chunk);
+          if (chunk.type === 'done' || chunk.type === 'error') break;
+        }
+      })();
+
+      await waitForStdin(proc);
+      const msg = getLastSentMessage(proc);
+
+      // Multiple metadata updates during a single turn
+      sendNotification(proc, 'kiro.dev/metadata', { contextUsagePercentage: 30 });
+      await new Promise(r => setTimeout(r, 10));
+      expect(backend.getContextUsage()).toEqual({ percentage: 30 });
+
+      sendNotification(proc, 'kiro.dev/metadata', { contextUsagePercentage: 45 });
+      await new Promise(r => setTimeout(r, 10));
+      expect(backend.getContextUsage()).toEqual({ percentage: 45 });
+
+      sendResponse(proc, msg.id, { stopReason: 'end_turn' });
+      await streamPromise;
+
+      // Should have emitted two context_usage events
+      const usageChunks = chunks.filter(c => c.type === 'context_usage');
+      expect(usageChunks).toHaveLength(2);
+      expect(usageChunks[0].percentage).toBe(30);
+      expect(usageChunks[1].percentage).toBe(45);
+    });
+
+    it('updates context via persistent listener outside chatStream', async () => {
+      // Simulate metadata notification without an active chatStream
+      // The persistent listener in _initialize should still update _contextUsage
+      sendNotification(proc, 'kiro.dev/metadata', { contextUsagePercentage: 67 });
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(backend.getContextUsage()).toEqual({ percentage: 67 });
+    });
+
+    it('ignores metadata notification without contextUsagePercentage', async () => {
+      const chunks = [];
+      const streamPromise = (async () => {
+        for await (const chunk of backend.chatStream(
+          [{ role: 'user', content: 'hi' }], null
+        )) {
+          chunks.push(chunk);
+          if (chunk.type === 'done' || chunk.type === 'error') break;
+        }
+      })();
+
+      await waitForStdin(proc);
+      const msg = getLastSentMessage(proc);
+
+      // Metadata without contextUsagePercentage should be ignored
+      sendNotification(proc, 'kiro.dev/metadata', { someOtherField: 'value' });
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(backend.getContextUsage()).toBeNull();
+      expect(chunks.filter(c => c.type === 'context_usage')).toHaveLength(0);
+
+      sendResponse(proc, msg.id, { stopReason: 'end_turn' });
+      await streamPromise;
     });
   });
 

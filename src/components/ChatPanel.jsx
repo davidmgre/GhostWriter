@@ -3,6 +3,7 @@ import { Send, Ghost, GripVertical, Eraser, Circle, Square, AlertCircle, Check, 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
+import ContextUsageBar from './ContextUsageBar';
 
 const API_BASE = `${window.location.pathname.replace(/\/+$/, '')}/api`;
 
@@ -234,12 +235,11 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       .catch(() => {});
   }, []);
 
-  // Poll context usage after connection — initial fetch + every 30s
+  // Fetch context usage on connection — updates arrive inline via SSE
+  // from kiro.dev/metadata during streaming, with a post-turn fetch as fallback.
   useEffect(() => {
     if (backendStatus !== 'connected') return;
     fetchContextUsage();
-    const interval = setInterval(fetchContextUsage, 30000);
-    return () => clearInterval(interval);
   }, [backendStatus, fetchContextUsage]);
 
   // Close model dropdown on outside click
@@ -719,27 +719,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         </div>
       </div>
       {/* Context usage bar */}
-      {contextUsage && contextUsage.percentage != null && (
-        <div className="px-4 py-1 border-b border-[#262626] flex items-center gap-2">
-          <div className="flex-1 h-1.5 bg-[#1a1a1a] rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                contextUsage.percentage >= 90 ? 'bg-red-500' :
-                contextUsage.percentage >= 50 ? 'bg-yellow-500' :
-                'bg-green-500'
-              }`}
-              style={{ width: `${Math.min(100, contextUsage.percentage)}%` }}
-            />
-          </div>
-          <span className={`text-[10px] font-mono ${
-            contextUsage.percentage >= 90 ? 'text-red-400' :
-            contextUsage.percentage >= 50 ? 'text-yellow-400' :
-            'text-green-400'
-          }`}>
-            {Math.round(contextUsage.percentage)}%
-          </span>
-        </div>
-      )}
+      <ContextUsageBar percentage={contextUsage?.percentage} />
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-w-0">

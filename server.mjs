@@ -392,6 +392,9 @@ function registerApi(router) {
   // --- Server-side directory browser (remote-compatible fallback) ---
   router.post('/browse-dir', (req, res) => {
     try {
+      if (req.body.path && typeof req.body.path !== 'string') {
+        return res.status(400).json({ error: 'path must be a string' });
+      }
       const requestedPath = req.body.path || getDocsDir() || process.env.HOME || '/';
       const resolved = path.resolve(requestedPath);
 
@@ -539,6 +542,9 @@ function registerApi(router) {
     try {
       const id = decodeURIComponent(req.params.id);
       const { content } = req.body;
+      if (typeof content !== 'string') {
+        return res.status(400).json({ error: 'content must be a string' });
+      }
 
       if (isFileId(id)) {
         // Loose file — just write directly, no versions
@@ -822,7 +828,7 @@ function registerApi(router) {
       res.json({ ...result, latency_ms: latency });
     } catch (err) {
       console.error(`[AI Test ${ts()}] ✗ exception: ${err.message}`);
-      res.json({ ok: false, error: err.message });
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 
@@ -836,7 +842,7 @@ function registerApi(router) {
       res.json({ ok: true });
     } catch (err) {
       console.error(`[AI Cancel ${ts()}] ✗ ${err.message}`);
-      res.json({ ok: false, error: err.message });
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 
@@ -852,7 +858,7 @@ function registerApi(router) {
       }
     } catch (err) {
       console.error(`[AI Reset ${ts()}] ✗ ${err.message}`);
-      res.json({ ok: false, error: err.message });
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 
@@ -940,7 +946,7 @@ function registerApi(router) {
       res.json({ commands });
     } catch (err) {
       console.error(`[AI Commands ${ts()}] ✗ ${err.message}`);
-      res.json({ commands: [] });
+      res.status(500).json({ error: err.message, commands: [] });
     }
   });
 
@@ -1011,7 +1017,10 @@ function registerApi(router) {
 
   router.post('/ai/chat', async (req, res) => {
     const { message, history = [], context, images = [], files = [] } = req.body;
-    if (!message) return res.status(400).json({ error: 'message is required' });
+    if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message must be a non-empty string' });
+    if (!Array.isArray(history)) return res.status(400).json({ error: 'history must be an array' });
+    if (!Array.isArray(images)) return res.status(400).json({ error: 'images must be an array' });
+    if (!Array.isArray(files)) return res.status(400).json({ error: 'files must be an array' });
 
     console.log(`[AI Chat ${ts()}] backend=kiro message="${message.substring(0, 80)}"`);
 

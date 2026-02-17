@@ -129,6 +129,7 @@ function App() {
   const currentDocRef = useRef(null);
   const documentsRef = useRef([]);
   const contentRef = useRef('');
+  const selectAbortRef = useRef(null); // abort stale doc fetches
 
   // Keep refs in sync for handlers that run inside stale closures
   useEffect(() => {
@@ -166,9 +167,16 @@ function App() {
 
   // Select document — uses documentsRef so it's safe from stale closures
   const selectDoc = useCallback(async (id) => {
+    // Abort any in-flight doc fetch to prevent race conditions
+    if (selectAbortRef.current) selectAbortRef.current.abort();
+    const controller = new AbortController();
+    selectAbortRef.current = controller;
+
     try {
-      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}`);
+      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}`, { signal: controller.signal });
       const data = await res.json();
+      if (controller.signal.aborted) return;
+
       setContent(data.content);
       lastVersionContent.current = data.content;
       lastSavedContent.current = data.content;
@@ -179,9 +187,11 @@ function App() {
       setVersionHistoryOpen(false);
 
       const updated = await loadDocuments();
+      if (controller.signal.aborted) return;
       const found = updated.find(n => n.id === id);
       if (found) setCurrentDoc(found);
     } catch (err) {
+      if (err.name === 'AbortError') return;
       console.error('Failed to load document:', err);
     }
   }, [loadDocuments]);
@@ -520,12 +530,17 @@ ${previewEl.innerHTML}
     URL.revokeObjectURL(url);
   }, []);
 
-  // Keyboard shortcuts (⌘S save, ⌘\ toggle sidebar)
+  // Keyboard shortcuts (⌘S save, ⌘N new doc, ⌘\ toggle sidebar)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         handleSave();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+        e.preventDefault();
+        const slug = `untitled-${Date.now().toString(36)}`;
+        createDoc(slug);
       }
       if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
         e.preventDefault();
@@ -534,7 +549,7 @@ ${previewEl.innerHTML}
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSave]);
+  }, [handleSave, createDoc]);
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);

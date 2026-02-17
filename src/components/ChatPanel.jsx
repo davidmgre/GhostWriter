@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Send, Ghost, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Slash, Loader2, RefreshCw, FileText, Plus } from 'lucide-react';
+import { Send, Ghost, GripVertical, Eraser, Circle, Square, AlertCircle, Check, ChevronDown, Slash, Loader2, RefreshCw, FileText, Plus, Copy } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -39,9 +39,17 @@ function nextId() {
 const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
   const isUser = msg.role === 'user';
   const isError = msg.role === 'error';
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(msg.content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  }, [msg.content]);
 
   return (
-    <div className={`flex flex-col gap-1 min-w-0 max-w-full ${isUser ? 'items-end' : 'items-start'}`}>
+    <div className={`group/msg flex flex-col gap-1 min-w-0 max-w-full ${isUser ? 'items-end' : 'items-start'}`}>
       <div className="flex items-center gap-1.5">
         {!isUser && (
           isError
@@ -51,9 +59,22 @@ const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
         <span className={`text-[10px] font-medium ${isUser ? 'text-blue-400' : isError ? 'text-red-400' : 'text-neutral-500'}`}>
           {isUser ? 'You' : isError ? 'Error' : 'GhostWriter'}
         </span>
-        <span className="text-[10px] text-neutral-700">
+        <span className="text-[10px] text-neutral-700" title={new Date(msg.timestamp).toLocaleString()}>
           {new Date(msg.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: _systemUses12h })}
         </span>
+        {msg.content && !isStreaming && (
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="opacity-0 group-hover/msg:opacity-100 transition-opacity p-0.5 rounded hover:bg-[#262626]"
+            title="Copy message"
+          >
+            {copied
+              ? <Check size={11} className="text-green-400" />
+              : <Copy size={11} className="text-neutral-600" />
+            }
+          </button>
+        )}
       </div>
       <div
         className={`text-sm px-3 py-2 rounded-lg break-words ${

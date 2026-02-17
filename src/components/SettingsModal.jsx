@@ -21,6 +21,13 @@ export default function SettingsModal({ onClose }) {
     loadSettings();
   }, []);
 
+  // Escape to close
+  useEffect(() => {
+    const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
   async function loadSettings() {
     try {
       const res = await fetch(`${API_BASE}/settings`);

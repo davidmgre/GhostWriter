@@ -659,6 +659,12 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   }
 
   function handleKeyDown(e) {
+    if (e.key === 'Escape') {
+      if (showSlashMenu) { setShowSlashMenu(false); return; }
+      if (modelDropdownOpen) { setModelDropdownOpen(false); return; }
+      if (confirmClear) { setConfirmClear(false); return; }
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage(e);

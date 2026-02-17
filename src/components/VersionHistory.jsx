@@ -19,6 +19,13 @@ export default function VersionHistory({ docId, onClose, onRestore }) {
     setCleanupResult(null);
   }, [docId]);
 
+  // Escape to close
+  useEffect(() => {
+    const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
   async function loadVersions() {
     setLoading(true);
     try {

@@ -101,6 +101,8 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [attachments, setAttachments] = useState([]); // attached files: { data, mimeType, name, kind: 'image' | 'file' }
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
+  const userScrolledUp = useRef(false);
   const inputRef = useRef(null);
   const isResizing = useRef(false);
   const abortRef = useRef(null);
@@ -179,10 +181,24 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     return () => es.close();
   }, [testConnection]);
 
-  // Scroll to bottom on new messages
+  // Scroll to bottom on new messages — but only if user hasn't scrolled up
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!userScrolledUp.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages, waiting]);
+
+  // Track whether user has scrolled away from the bottom
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userScrolledUp.current = distanceFromBottom > 80;
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, []);
 
   // Test connection on mount
   useEffect(() => {
@@ -293,6 +309,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
     setInput('');
     setStreaming(true);
     setWaiting(true);
+    userScrolledUp.current = false; // Auto-scroll to follow new response
 
     // Use override if provided (for toggle auto-send before state updates)
     const effectiveEditMode = overrideEditMode !== undefined ? overrideEditMode : editMode;
@@ -722,7 +739,7 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
       <ContextUsageBar percentage={contextUsage?.percentage} />
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-w-0">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-w-0">
         {messages.length === 0 && (
           <div className="text-center text-neutral-600 text-xs mt-8">
             <Ghost size={24} className="mx-auto mb-2 text-neutral-700" />
@@ -848,7 +865,8 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
                 <button
                   type="button"
                   onClick={() => removeAttachment(i)}
-                  className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-600 text-white text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-600 hover:bg-red-500 text-white text-[10px] flex items-center justify-center transition-colors"
+                  title="Remove attachment"
                 >
                   ×
                 </button>

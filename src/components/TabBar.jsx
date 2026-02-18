@@ -1,7 +1,6 @@
-import { X } from 'lucide-react';
+import { X, Plus } from 'lucide-react';
 
-export default function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, dirtyTabIds = new Set() }) {
-  if (tabs.length === 0) return null;
+export default function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onNewTab, dirtyTabIds = new Set() }) {
 
   // Detect duplicate filenames for disambiguation
   const nameCount = {};
@@ -63,6 +62,17 @@ export default function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, dir
           </div>
         );
       })}
+
+      {/* New tab button */}
+      {onNewTab && (
+        <button
+          onClick={onNewTab}
+          className="flex items-center justify-center w-7 shrink-0 text-neutral-600 hover:text-neutral-300 hover:bg-[#141414] transition-colors"
+          title="New document"
+        >
+          <Plus size={13} />
+        </button>
+      )}
     </div>
   );
 }

@@ -125,6 +125,8 @@ function App() {
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [openTabs, setOpenTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
+  const [docsDir, setDocsDir] = useState('');
+  const docsDirRef = useRef('');
   const autoSaveTimer = useRef(null);
   const versionSnapshotTimer = useRef(null);
   const lastVersionContent = useRef('');
@@ -157,6 +159,10 @@ function App() {
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
   }, [activeTabId]);
+
+  useEffect(() => {
+    docsDirRef.current = docsDir;
+  }, [docsDir]);
 
   // Load documents — uses refs so it's safe to call from stale closures (e.g. SSE)
   const loadDocuments = useCallback(async () => {
@@ -211,7 +217,12 @@ function App() {
       // Add/activate tab
       const tabId = id;
       const filename = docInfo.filename || docInfo.title || id;
-      const absPath = ''; // folder docs don't have an external absPath
+      // Build full path: for file: types it's docsDir/filename, for projects it's docsDir/id/draft.md
+      const dir = docsDirRef.current;
+      const isFile = id.startsWith('file:');
+      const absPath = dir
+        ? (isFile ? `${dir}/${id.slice(5)}` : `${dir}/${id}/draft.md`)
+        : '';
       setOpenTabs(prev => {
         if (prev.some(t => t.id === tabId)) return prev;
         return [...prev, {
@@ -220,7 +231,7 @@ function App() {
           docId: id,
           absPath,
           title: filename.replace(/\.md$/, ''),
-          dirName: '',
+          dirName: dir ? dir.split('/').pop() : '',
         }];
       });
       setActiveTabId(tabId);
@@ -307,9 +318,12 @@ function App() {
     };
   }, [loadDocuments]);
 
-  // Load documents on mount
+  // Load documents and settings on mount
   useEffect(() => {
     loadDocuments();
+    fetch(`${API_BASE}/settings`).then(r => r.json()).then(d => {
+      if (d.resolvedDir) setDocsDir(d.resolvedDir);
+    }).catch(() => {});
   }, [loadDocuments]);
 
   // Auto-save with debounce — handles both folder docs and external files
@@ -555,7 +569,9 @@ function App() {
         body: JSON.stringify({ docsDir: data.path }),
       });
 
-      // Reset current doc and reload
+      // Update docsDir and reload
+      const settingsRes = await fetch(`${API_BASE}/settings`).then(r => r.json());
+      if (settingsRes.resolvedDir) setDocsDir(settingsRes.resolvedDir);
       setCurrentDoc(null);
       setContent('');
       const docs = await loadDocuments();
@@ -611,6 +627,16 @@ function App() {
       console.error('Failed to rename document:', err);
     }
   }, [loadDocuments, selectDoc]);
+
+  // Generate next "untitled-N" slug that doesn't conflict with existing docs
+  const nextUntitledSlug = useCallback(() => {
+    const docs = documentsRef.current;
+    let n = 1;
+    while (docs.some(d => d.id === `file:untitled-${n}.md` || d.slug === `untitled-${n}`)) {
+      n++;
+    }
+    return `untitled-${n}`;
+  }, []);
 
   // Create new document
   const createDoc = useCallback(async (slug) => {
@@ -771,8 +797,7 @@ ${previewEl.innerHTML}
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
         e.preventDefault();
-        const slug = `untitled-${Date.now().toString(36)}`;
-        createDoc(slug);
+        createDoc(nextUntitledSlug());
       }
       if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
         e.preventDefault();
@@ -786,7 +811,7 @@ ${previewEl.innerHTML}
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSave, createDoc, handleCloseTab]);
+  }, [handleSave, createDoc, nextUntitledSlug, handleCloseTab]);
 
   // Warn before closing browser window/tab with unsaved changes
   useEffect(() => {
@@ -949,8 +974,30 @@ ${previewEl.innerHTML}
               activeTabId={activeTabId}
               onSelectTab={handleSelectTab}
               onCloseTab={handleCloseTab}
+              onNewTab={() => createDoc(nextUntitledSlug())}
               dirtyTabIds={saveStatus === 'unsaved' && activeTabId ? new Set([activeTabId]) : new Set()}
             />
+            {/* Active file path breadcrumb */}
+            {(() => {
+              const activeTab = openTabs.find(t => t.id === activeTabId);
+              const filePath = activeTab?.absPath;
+              if (!filePath) return null;
+              // Abbreviate home directory
+              const home = '/Users/';
+              let display = filePath;
+              if (display.includes(home)) {
+                const afterUsers = display.slice(display.indexOf(home) + home.length);
+                const slashIdx = afterUsers.indexOf('/');
+                display = '~' + (slashIdx >= 0 ? afterUsers.slice(slashIdx) : '');
+              }
+              return (
+                <div className="h-5 flex items-center px-3 bg-[#0a0a0a] border-b border-[#1a1a1a] shrink-0">
+                  <span className="text-[10px] text-neutral-600 truncate" title={filePath}>
+                    {display}
+                  </span>
+                </div>
+              );
+            })()}
             {activeTabId ? (
               <div className="flex-1 flex overflow-hidden">
                 {(viewMode === 'split' || viewMode === 'edit') && (

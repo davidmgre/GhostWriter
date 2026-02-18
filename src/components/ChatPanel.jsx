@@ -163,13 +163,37 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
   }, [messages]);
 
   // Sync edit mode to server (also triggers ACP mode switch server-side)
+  // When switching TO edit mode and the last message was an assistant reply,
+  // automatically re-send to apply the suggested changes.
+  const prevEditMode = useRef(false);
   useEffect(() => {
+    const turningOn = editMode && !prevEditMode.current;
+    prevEditMode.current = editMode;
+
     fetch(`${API_BASE}/edit-mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: editMode }),
+    }).then(() => {
+      if (turningOn) {
+        // If the last message in chat is an assistant reply, the AI gave
+        // read-only suggestions — re-trigger so it actually applies them.
+        setMessages(prev => {
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content && !streaming) {
+            // Find the last user message to re-send
+            for (let i = prev.length - 2; i >= 0; i--) {
+              if (prev[i].role === 'user') {
+                doSend(prev[i].content, true);
+                break;
+              }
+            }
+          }
+          return prev;
+        });
+      }
     }).catch(() => {});
-  }, [editMode]);
+  }, [editMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-dismiss clear confirmation after 3 seconds
   useEffect(() => {
@@ -849,39 +873,66 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
                   <div className="flex-1 h-px bg-[#1a1a1a]" />
                 </div>
               )}
+              {/* Tool calls render above the streaming assistant message */}
+              {isStreamingThis && toolCalls.length > 0 && (
+                <div className="flex flex-col gap-1 items-start mb-2">
+                  {toolCalls.map((tc) => (
+                    <div key={tc.id || tc.title} className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-1.5">
+                      {tc.status === 'done' || tc.status === 'completed' ? (
+                        <Check size={12} className="text-green-400" />
+                      ) : (
+                        <Loader2 size={12} className="text-amber-400 animate-spin" />
+                      )}
+                      {tc.kind && (
+                        <span className="text-[10px] text-neutral-600 font-mono">{tc.kind}</span>
+                      )}
+                      <span className={`text-[11px] ${tc.status === 'done' || tc.status === 'completed' ? 'text-neutral-500' : 'text-amber-300'}`}>
+                        {tc.title}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Compaction indicator above streaming message */}
+              {isStreamingThis && compacting && (
+                <div className="flex items-center gap-1.5 bg-[#1a1a1a] border border-amber-500/20 rounded-lg px-3 py-1.5 mb-2">
+                  <Loader2 size={12} className="text-amber-400 animate-spin" />
+                  <span className="text-[11px] text-amber-300">Compacting context...</span>
+                </div>
+              )}
               <ChatMessage msg={msg} isStreaming={isStreamingThis} />
             </div>
           );
         })}
-        {/* Tool call activity indicators */}
-        {toolCalls.length > 0 && (
-          <div className="flex flex-col gap-1 items-start">
-            {toolCalls.map((tc) => (
-              <div key={tc.id || tc.title} className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-1.5">
-                {tc.status === 'done' || tc.status === 'completed' ? (
-                  <Check size={12} className="text-green-400" />
-                ) : (
-                  <Loader2 size={12} className="text-amber-400 animate-spin" />
-                )}
-                {tc.kind && (
-                  <span className="text-[10px] text-neutral-600 font-mono">{tc.kind}</span>
-                )}
-                <span className={`text-[11px] ${tc.status === 'done' || tc.status === 'completed' ? 'text-neutral-500' : 'text-amber-300'}`}>
-                  {tc.title}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-        {/* Compaction indicator */}
-        {compacting && (
-          <div className="flex items-center gap-1.5 bg-[#1a1a1a] border border-amber-500/20 rounded-lg px-3 py-1.5">
-            <Loader2 size={12} className="text-amber-400 animate-spin" />
-            <span className="text-[11px] text-amber-300">Compacting context...</span>
-          </div>
-        )}
         {waiting && (
           <div className="flex flex-col gap-1 items-start">
+            {/* Tool calls during waiting — only when not yet streaming text */}
+            {!streaming && toolCalls.length > 0 && (
+              <div className="flex flex-col gap-1 items-start mb-1">
+                {toolCalls.map((tc) => (
+                  <div key={tc.id || tc.title} className="flex items-center gap-1.5 bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-1.5">
+                    {tc.status === 'done' || tc.status === 'completed' ? (
+                      <Check size={12} className="text-green-400" />
+                    ) : (
+                      <Loader2 size={12} className="text-amber-400 animate-spin" />
+                    )}
+                    {tc.kind && (
+                      <span className="text-[10px] text-neutral-600 font-mono">{tc.kind}</span>
+                    )}
+                    <span className={`text-[11px] ${tc.status === 'done' || tc.status === 'completed' ? 'text-neutral-500' : 'text-amber-300'}`}>
+                      {tc.title}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Compaction during waiting — only when not yet streaming text */}
+            {!streaming && compacting && (
+              <div className="flex items-center gap-1.5 bg-[#1a1a1a] border border-amber-500/20 rounded-lg px-3 py-1.5 mb-1">
+                <Loader2 size={12} className="text-amber-400 animate-spin" />
+                <span className="text-[11px] text-amber-300">Compacting context...</span>
+              </div>
+            )}
             <div className="flex items-center gap-1.5">
               <Ghost size={12} className="text-blue-400" />
               <span className="text-[10px] font-medium text-neutral-500">GhostWriter</span>

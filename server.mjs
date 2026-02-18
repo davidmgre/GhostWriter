@@ -98,6 +98,96 @@ function isOwnWrite(filePath) {
 // Cache of last known good content per doc, used for rollback
 const lastKnownContent = new Map();
 
+// --- External file management (files outside docsDir) ---
+const externalWatchers = new Map(); // absPath → fs.FSWatcher
+const externalWatchDebounce = new Map(); // absPath → timer
+
+const ALLOWED_EXTENSIONS = new Set(['.md', '.markdown', '.txt']);
+const BLOCKED_PATH_PATTERNS = ['/.ssh/', '/.aws/', '/.env', '/credentials', '/.git/config'];
+
+function validateExternalPath(absPath) {
+  // Must be absolute
+  if (!path.isAbsolute(absPath)) {
+    return { valid: false, error: 'Path must be absolute' };
+  }
+
+  // Resolve symlinks — reject dangling symlinks
+  let resolved;
+  try {
+    resolved = fs.realpathSync(absPath);
+  } catch {
+    return { valid: false, error: 'Path does not exist or has dangling symlink' };
+  }
+
+  // Must be a regular file
+  try {
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile()) {
+      return { valid: false, error: 'Path is not a regular file' };
+    }
+    // Size under 5MB
+    if (stat.size > 5 * 1024 * 1024) {
+      return { valid: false, error: 'File exceeds 5MB size limit' };
+    }
+  } catch {
+    return { valid: false, error: 'Cannot stat file' };
+  }
+
+  // Extension allowlist
+  const ext = path.extname(resolved).toLowerCase();
+  if (!ALLOWED_EXTENSIONS.has(ext)) {
+    return { valid: false, error: `Extension "${ext}" not allowed. Allowed: ${[...ALLOWED_EXTENSIONS].join(', ')}` };
+  }
+
+  // Path blocklist
+  for (const pattern of BLOCKED_PATH_PATTERNS) {
+    if (resolved.includes(pattern)) {
+      return { valid: false, error: 'Path is blocked for security reasons' };
+    }
+  }
+
+  return { valid: true, resolved };
+}
+
+function startExternalWatch(absPath) {
+  if (externalWatchers.has(absPath)) return;
+
+  try {
+    const watcher = fs.watch(absPath, (eventType) => {
+      // Debounce
+      if (externalWatchDebounce.has(absPath)) clearTimeout(externalWatchDebounce.get(absPath));
+      externalWatchDebounce.set(absPath, setTimeout(() => {
+        externalWatchDebounce.delete(absPath);
+        const tabId = `ext:${absPath}`;
+        broadcastSSE('external-file-changed', { tabId, absPath, eventType });
+      }, 500));
+    });
+
+    watcher.on('error', (err) => {
+      console.warn(`[ExtWatch ${ts()}] Error watching ${logPath(absPath)}: ${err.message}`);
+      stopExternalWatch(absPath);
+    });
+
+    externalWatchers.set(absPath, watcher);
+    console.log(`[ExtWatch ${ts()}] Watching: ${logPath(absPath)}`);
+  } catch (err) {
+    console.warn(`[ExtWatch ${ts()}] Failed to watch ${logPath(absPath)}: ${err.message}`);
+  }
+}
+
+function stopExternalWatch(absPath) {
+  const watcher = externalWatchers.get(absPath);
+  if (watcher) {
+    try { watcher.close(); } catch {}
+    externalWatchers.delete(absPath);
+    console.log(`[ExtWatch ${ts()}] Stopped watching: ${logPath(absPath)}`);
+  }
+  if (externalWatchDebounce.has(absPath)) {
+    clearTimeout(externalWatchDebounce.get(absPath));
+    externalWatchDebounce.delete(absPath);
+  }
+}
+
 // --- SSE clients for live reload ---
 let sseClients = [];
 
@@ -433,6 +523,108 @@ function registerApi(router) {
         parent: resolved !== parentDir ? parentDir : null,
         entries,
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- External file endpoints (files outside docsDir) ---
+  router.post('/open-file', (req, res) => {
+    try {
+      const { path: filePath } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: 'path is required' });
+      }
+
+      const validation = validateExternalPath(filePath);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      const absPath = validation.resolved;
+      const content = fs.readFileSync(absPath, 'utf-8');
+      const filename = path.basename(absPath);
+      const dirName = path.basename(path.dirname(absPath));
+      const id = `ext:${absPath}`;
+
+      res.json({
+        success: true,
+        id,
+        filename,
+        dirName,
+        absPath,
+        content,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/save-file', (req, res) => {
+    try {
+      const { path: filePath, content } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: 'path is required' });
+      }
+      if (typeof content !== 'string') {
+        return res.status(400).json({ error: 'content must be a string' });
+      }
+
+      const validation = validateExternalPath(filePath);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      // Check write permission
+      try {
+        fs.accessSync(validation.resolved, fs.constants.W_OK);
+      } catch {
+        return res.status(403).json({ error: 'No write permission for this file' });
+      }
+
+      fs.writeFileSync(validation.resolved, content, 'utf-8');
+      res.json({ success: true, timestamp: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/watch-file', (req, res) => {
+    try {
+      const { path: filePath } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: 'path is required' });
+      }
+
+      const validation = validateExternalPath(filePath);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      startExternalWatch(validation.resolved);
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/unwatch-file', (req, res) => {
+    try {
+      const { path: filePath } = req.body;
+      if (!filePath || typeof filePath !== 'string') {
+        return res.status(400).json({ error: 'path is required' });
+      }
+
+      // Resolve to match how we stored it
+      let resolved;
+      try {
+        resolved = fs.realpathSync(filePath);
+      } catch {
+        resolved = filePath;
+      }
+
+      stopExternalWatch(resolved);
+      res.json({ success: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

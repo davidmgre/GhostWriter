@@ -102,7 +102,7 @@ const ChatMessage = memo(function ChatMessage({ msg, isStreaming }) {
   );
 });
 
-export default function ChatPanel({ fullWidth = false, currentDoc = null, documentContent = '' }) {
+export default function ChatPanel({ fullWidth = false, currentDoc = null, documentContent = '', onOpenFile = null }) {
   const [messages, setMessages] = useState(loadSessionMessages);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -432,6 +432,10 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
               setToolCalls(prev => prev.map(tc =>
                 tc.id === parsed.id ? { ...tc, status: 'done' } : tc
               ));
+            } else if (parsed.type === 'open_file') {
+              if (onOpenFile && parsed.path) {
+                onOpenFile(parsed.path);
+              }
             } else if (parsed.type === 'context_usage') {
               setContextUsage(parsed);
             } else if (parsed.type === 'compaction') {

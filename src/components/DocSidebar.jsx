@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { FileText, Plus, Calendar, Hash, File, FolderOpen, MoreVertical, Pencil } from 'lucide-react';
 
-export default function DocSidebar({ documents, currentDoc, onSelect, onCreate, onClose, onOpenFolder, onRename }) {
+export default function DocSidebar({ documents, currentDoc, onSelect, onCreate, onClose, onOpenFolder, onRename, openTabIds = new Set() }) {
   const [showNewForm, setShowNewForm] = useState(false);
   const [newSlug, setNewSlug] = useState('');
   const [menuOpenId, setMenuOpenId] = useState(null);
@@ -105,6 +105,9 @@ export default function DocSidebar({ documents, currentDoc, onSelect, onCreate, 
                   <div className={`text-sm text-neutral-200 truncate ${isProject ? 'font-medium' : ''}`}>
                     {doc.title}
                   </div>
+                  {openTabIds.has(doc.id) && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0" title="Open in tab" />
+                  )}
                 </div>
                 {isProject && (
                   <div className="flex items-center gap-2 mt-1 text-xs text-neutral-600 pl-[18px]">

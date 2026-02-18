@@ -4,6 +4,7 @@ import Preview from './components/Preview';
 import ChatPanel from './components/ChatPanel';
 import Header from './components/Header';
 import DocSidebar from './components/DocSidebar';
+import TabBar from './components/TabBar';
 import VersionHistory from './components/VersionHistory';
 import SettingsModal from './components/SettingsModal';
 import FileBrowser from './components/FileBrowser';
@@ -118,10 +119,12 @@ function App() {
   const [documents, setDocuments] = useState([]);
   const [currentDoc, setCurrentDoc] = useState(null);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [fileBrowserOpen, setFileBrowserOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [openTabs, setOpenTabs] = useState([]);
+  const [activeTabId, setActiveTabId] = useState(null);
   const autoSaveTimer = useRef(null);
   const versionSnapshotTimer = useRef(null);
   const lastVersionContent = useRef('');
@@ -129,6 +132,9 @@ function App() {
   const currentDocRef = useRef(null);
   const documentsRef = useRef([]);
   const contentRef = useRef('');
+  const tabContents = useRef(new Map()); // tab ID → cached content
+  const openTabsRef = useRef([]);
+  const activeTabIdRef = useRef(null);
   const selectAbortRef = useRef(null); // abort stale doc fetches
 
   // Keep refs in sync for handlers that run inside stale closures
@@ -143,6 +149,14 @@ function App() {
   useEffect(() => {
     contentRef.current = content;
   }, [content]);
+
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+  }, [openTabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
 
   // Load documents — uses refs so it's safe to call from stale closures (e.g. SSE)
   const loadDocuments = useCallback(async () => {
@@ -166,11 +180,18 @@ function App() {
   }, []);
 
   // Select document — uses documentsRef so it's safe from stale closures
+  // Now also manages tabs: adds a tab if not already open, activates it
   const selectDoc = useCallback(async (id) => {
     // Abort any in-flight doc fetch to prevent race conditions
     if (selectAbortRef.current) selectAbortRef.current.abort();
     const controller = new AbortController();
     selectAbortRef.current = controller;
+
+    // Cache outgoing tab's content before switching
+    const prevTabId = activeTabIdRef.current;
+    if (prevTabId && prevTabId !== id) {
+      tabContents.current.set(prevTabId, contentRef.current);
+    }
 
     try {
       const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(id)}`, { signal: controller.signal });
@@ -182,9 +203,27 @@ function App() {
       lastSavedContent.current = data.content;
 
       const doc = documentsRef.current.find(n => n.id === id);
-      setCurrentDoc(doc || { id, title: 'Loading...', date: '', versionCount: 0, type: data.type || 'project' });
+      const docInfo = doc || { id, title: 'Loading...', date: '', versionCount: 0, type: data.type || 'project' };
+      setCurrentDoc(docInfo);
       setSaveStatus('saved');
       setVersionHistoryOpen(false);
+
+      // Add/activate tab
+      const tabId = id;
+      const filename = docInfo.filename || docInfo.title || id;
+      const absPath = ''; // folder docs don't have an external absPath
+      setOpenTabs(prev => {
+        if (prev.some(t => t.id === tabId)) return prev;
+        return [...prev, {
+          id: tabId,
+          type: 'folder',
+          docId: id,
+          absPath,
+          title: filename.replace(/\.md$/, ''),
+          dirName: '',
+        }];
+      });
+      setActiveTabId(tabId);
 
       const updated = await loadDocuments();
       if (controller.signal.aborted) return;
@@ -228,6 +267,31 @@ function App() {
         loadDocuments();
       });
 
+      eventSource.addEventListener('external-file-changed', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          const currentTabId = activeTabIdRef.current;
+          if (data.tabId && data.tabId === currentTabId && data.absPath) {
+            // Reload content for the active external tab
+            fetch(`${API_BASE}/open-file`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: data.absPath }),
+            })
+              .then(res => res.json())
+              .then(d => {
+                if (d.success && d.content !== contentRef.current) {
+                  setContent(d.content);
+                  lastSavedContent.current = d.content;
+                  lastVersionContent.current = d.content;
+                  setSaveStatus('saved');
+                }
+              })
+              .catch(() => {});
+          }
+        } catch {}
+      });
+
       eventSource.onerror = () => {
         eventSource.close();
         // Reconnect after 3 seconds
@@ -248,18 +312,35 @@ function App() {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Auto-save with debounce — uses currentDocRef so it's stable and safe from stale closures
+  // Auto-save with debounce — handles both folder docs and external files
   const saveContent = useCallback(async (text, createVersion = false) => {
     const current = currentDocRef.current;
     if (!current) return;
 
+    // Determine if the active tab is external
+    const activeTab = openTabsRef.current.find(t => t.id === activeTabIdRef.current);
+    const isExternal = activeTab && activeTab.type === 'external';
+
     try {
       setSaveStatus('saving');
-      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(current.id)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text }),
-      });
+
+      let res;
+      if (isExternal && activeTab.absPath) {
+        // External file — use save-file endpoint
+        res = await fetch(`${API_BASE}/save-file`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: activeTab.absPath, content: text }),
+        });
+      } else {
+        // Folder doc — use existing endpoint
+        res = await fetch(`${API_BASE}/documents/${encodeURIComponent(current.id)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text }),
+        });
+      }
+
       const data = await res.json();
       if (data.success) {
         setSaveStatus('saved');
@@ -267,7 +348,7 @@ function App() {
         lastSavedContent.current = text;
         if (createVersion) {
           lastVersionContent.current = text;
-          loadDocuments();
+          if (!isExternal) loadDocuments();
         }
       }
     } catch (err) {
@@ -305,6 +386,157 @@ function App() {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     saveContent(contentRef.current, true);
   }, [saveContent]);
+
+  // Tab switching handler — caches outgoing content, loads incoming content
+  const handleSelectTab = useCallback((tabId) => {
+    if (tabId === activeTabIdRef.current) return;
+
+    // Flush auto-save for outgoing tab
+    if (autoSaveTimer.current) {
+      clearTimeout(autoSaveTimer.current);
+      autoSaveTimer.current = null;
+      if (contentRef.current !== lastSavedContent.current) {
+        saveContent(contentRef.current, false);
+      }
+    }
+
+    // Cache current content
+    const prevTabId = activeTabIdRef.current;
+    if (prevTabId) {
+      tabContents.current.set(prevTabId, contentRef.current);
+    }
+
+    const tab = openTabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+
+    if (tab.type === 'folder' && tab.docId) {
+      // Load from existing selectDoc flow (which also sets currentDoc)
+      selectDoc(tab.docId);
+    } else if (tab.type === 'external') {
+      // Load cached content or re-fetch
+      const cached = tabContents.current.get(tabId);
+      if (cached !== undefined) {
+        setContent(cached);
+        lastSavedContent.current = cached;
+        lastVersionContent.current = cached;
+      }
+      // Set a minimal currentDoc for external files
+      setCurrentDoc({ id: tabId, title: tab.title, date: '', versionCount: 0, type: 'external' });
+      setActiveTabId(tabId);
+      setSaveStatus('saved');
+    }
+  }, [saveContent, selectDoc]);
+
+  // Close tab handler — prompts to save if dirty, removes from list, activates adjacent
+  const handleCloseTab = useCallback(async (tabId) => {
+    const tab = openTabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+
+    // Check if this tab has unsaved changes
+    const isActive = tabId === activeTabIdRef.current;
+    const tabContent = isActive ? contentRef.current : tabContents.current.get(tabId);
+    const isDirty = isActive
+      ? (contentRef.current !== lastSavedContent.current)
+      : (tabContent !== undefined && tabContent !== lastSavedContent.current);
+
+    if (isDirty) {
+      // Show native save/discard/cancel dialog
+      const choice = window.confirm(
+        `"${tab.title}" has unsaved changes.\n\nClick OK to save and close, or Cancel to go back.`
+      );
+      if (!choice) return; // Cancel — don't close
+
+      // Save before closing
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+      if (isActive) {
+        await saveContent(contentRef.current, false);
+      }
+    }
+
+    // Unwatch external files
+    if (tab.type === 'external' && tab.absPath) {
+      fetch(`${API_BASE}/unwatch-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: tab.absPath }),
+      }).catch(() => {});
+    }
+
+    // Remove from tabs
+    const prevTabs = openTabsRef.current;
+    const idx = prevTabs.findIndex(t => t.id === tabId);
+    const newTabs = prevTabs.filter(t => t.id !== tabId);
+    setOpenTabs(newTabs);
+    tabContents.current.delete(tabId);
+
+    // Activate adjacent tab if closing the active one
+    if (isActive) {
+      if (newTabs.length > 0) {
+        const nextIdx = Math.min(idx, newTabs.length - 1);
+        handleSelectTab(newTabs[nextIdx].id);
+      } else {
+        setActiveTabId(null);
+        setCurrentDoc(null);
+        setContent('');
+        setSaveStatus('saved');
+      }
+    }
+  }, [saveContent, handleSelectTab]);
+
+  // AI-driven file opening — opens an external file as a tab
+  const handleAIOpenFile = useCallback(async (filePath) => {
+    // Check if already open
+    const existingTab = openTabsRef.current.find(t => t.absPath === filePath);
+    if (existingTab) {
+      handleSelectTab(existingTab.id);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/open-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        console.error('Failed to open external file:', data.error);
+        return;
+      }
+
+      // Cache outgoing tab content
+      const prevTabId = activeTabIdRef.current;
+      if (prevTabId) {
+        tabContents.current.set(prevTabId, contentRef.current);
+      }
+
+      const newTab = {
+        id: data.id,
+        type: 'external',
+        docId: null,
+        absPath: data.absPath,
+        title: data.filename.replace(/\.md$/, ''),
+        dirName: data.dirName,
+      };
+
+      setOpenTabs(prev => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+      setContent(data.content);
+      lastSavedContent.current = data.content;
+      lastVersionContent.current = data.content;
+      setCurrentDoc({ id: newTab.id, title: newTab.title, date: '', versionCount: 0, type: 'external' });
+      setSaveStatus('saved');
+
+      // Start watching
+      fetch(`${API_BASE}/watch-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: data.absPath }),
+      }).catch(() => {});
+    } catch (err) {
+      console.error('Failed to open external file:', err);
+    }
+  }, [handleSelectTab]);
 
   // Auto-select first document
   useEffect(() => {
@@ -546,10 +778,26 @@ ${previewEl.innerHTML}
         e.preventDefault();
         setSidebarOpen(prev => !prev);
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'w') {
+        e.preventDefault();
+        const activeId = activeTabIdRef.current;
+        if (activeId) handleCloseTab(activeId);
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSave, createDoc]);
+  }, [handleSave, createDoc, handleCloseTab]);
+
+  // Warn before closing browser window/tab with unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (saveStatus === 'unsaved') {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [saveStatus]);
 
   // Mobile detection
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
@@ -650,7 +898,7 @@ ${previewEl.innerHTML}
             )}
             {mobileTab === 'chat' && (
               <div className="h-full">
-                <ChatPanel fullWidth currentDoc={currentDoc} documentContent={content} />
+                <ChatPanel fullWidth currentDoc={currentDoc} documentContent={content} onOpenFile={handleAIOpenFile} />
               </div>
             )}
           </div>
@@ -691,23 +939,39 @@ ${previewEl.innerHTML}
               onCreate={createDoc}
               onOpenFolder={openFolder}
               onRename={renameDoc}
+              openTabIds={new Set(openTabs.map(t => t.id))}
             />
           </div>
 
-          <div className="flex-1 flex overflow-hidden min-w-0">
-            {(viewMode === 'split' || viewMode === 'edit') && (
-              <div className={`${viewMode === 'split' ? 'w-1/2' : 'w-full'} overflow-hidden border-r border-[#262626]`}>
-                <Editor content={content} onChange={handleContentChange} />
+          <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+            <TabBar
+              tabs={openTabs}
+              activeTabId={activeTabId}
+              onSelectTab={handleSelectTab}
+              onCloseTab={handleCloseTab}
+              dirtyTabIds={saveStatus === 'unsaved' && activeTabId ? new Set([activeTabId]) : new Set()}
+            />
+            {activeTabId ? (
+              <div className="flex-1 flex overflow-hidden">
+                {(viewMode === 'split' || viewMode === 'edit') && (
+                  <div className={`${viewMode === 'split' ? 'w-1/2' : 'w-full'} overflow-hidden border-r border-[#262626]`}>
+                    <Editor content={content} onChange={handleContentChange} />
+                  </div>
+                )}
+                {(viewMode === 'split' || viewMode === 'preview') && (
+                  <div className={`${viewMode === 'split' ? 'w-1/2' : 'w-full'} overflow-auto p-4 md:p-6`}>
+                    <Preview content={content} />
+                  </div>
+                )}
               </div>
-            )}
-            {(viewMode === 'split' || viewMode === 'preview') && (
-              <div className={`${viewMode === 'split' ? 'w-1/2' : 'w-full'} overflow-auto p-4 md:p-6`}>
-                <Preview content={content} />
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-neutral-600 text-sm">
+                Open a file via AI chat or the sidebar
               </div>
             )}
           </div>
 
-          {versionHistoryOpen && currentDoc && currentDoc.type !== 'file' && (
+          {versionHistoryOpen && currentDoc && currentDoc.type !== 'file' && currentDoc.type !== 'external' && (
             <VersionHistory
               docId={currentDoc.id}
               onClose={() => setVersionHistoryOpen(false)}
@@ -719,7 +983,7 @@ ${previewEl.innerHTML}
             />
           )}
 
-          {chatOpen && <ChatPanel currentDoc={currentDoc} documentContent={content} />}
+          {chatOpen && <ChatPanel currentDoc={currentDoc} documentContent={content} onOpenFile={handleAIOpenFile} />}
         </div>
       )}
     </div>

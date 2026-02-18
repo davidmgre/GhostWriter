@@ -13,7 +13,7 @@ export default function ContextUsageBar({ percentage }) {
     'text-emerald-400';
 
   return (
-    <div className="px-4 py-1 border-b border-[#262626] flex items-center gap-2"
+    <div className="px-4 py-1 border-t border-[#262626] flex items-center gap-2"
          title={`Context window ${rounded}% used`}>
       <span className="text-[10px] text-neutral-500 shrink-0">ctx</span>
       <div className="flex-1 h-1.5 bg-[#1a1a1a] rounded-full overflow-hidden">

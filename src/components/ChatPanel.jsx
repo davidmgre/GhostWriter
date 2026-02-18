@@ -809,9 +809,6 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
           </button>
         </div>
       </div>
-      {/* Context usage bar */}
-      <ContextUsageBar percentage={contextUsage?.percentage} />
-
       {/* Messages */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-w-0">
         {messages.length === 0 && (
@@ -897,6 +894,9 @@ export default function ChatPanel({ fullWidth = false, currentDoc = null, docume
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Context usage bar — sits between messages and input */}
+      <ContextUsageBar percentage={contextUsage?.percentage} />
 
       {/* Input */}
       <form onSubmit={sendMessage} className="p-3 border-t border-[#1a1a1a] space-y-2">

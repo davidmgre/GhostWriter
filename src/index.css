@@ -167,6 +167,8 @@ body {
 .markdown-preview img {
   max-width: 100%;
   border-radius: 8px;
+  display: block;
+  margin: 1em 0;
 }
 
 /* Chat markdown (compact, inline with message bubbles) */

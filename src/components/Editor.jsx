@@ -2,6 +2,56 @@ import CodeMirror from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorView } from '@codemirror/view';
+import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
+
+// Configure turndown for clean GFM output
+const td = new TurndownService({
+  headingStyle: 'atx',
+  hr: '---',
+  bulletListMarker: '-',
+  codeBlockStyle: 'fenced',
+  emDelimiter: '_',
+  strongDelimiter: '**',
+});
+td.use(gfm); // adds table, strikethrough, task list support
+
+// Drop blob: and data: images (won't persist), keep real https:// URLs
+td.addRule('filter-images', {
+  filter: 'img',
+  replacement: (content, node) => {
+    const src = node.getAttribute('src') || '';
+    if (src.startsWith('blob:') || src.startsWith('data:')) return '';
+    const alt = node.getAttribute('alt') || '';
+    return src ? `![${alt}](${src})` : '';
+  },
+});
+
+// Smart paste extension — intercepts paste events and converts HTML → Markdown
+const smartPaste = EditorView.domEventHandlers({
+  paste(event, view) {
+    const data = event.clipboardData;
+    if (!data) return false;
+
+    const html = data.getData('text/html');
+    if (!html) return false; // no HTML in clipboard — fall through to default
+
+    event.preventDefault();
+
+    let converted = td.turndown(html);
+
+    // Clean up excessive blank lines (turndown can produce 3+ in a row)
+    converted = converted.replace(/\n{3,}/g, '\n\n').trim();
+
+    const { from, to } = view.state.selection.main;
+    view.dispatch({
+      changes: { from, to, insert: converted },
+      selection: { anchor: from + converted.length },
+    });
+
+    return true;
+  },
+});
 
 const customTheme = EditorView.theme({
   '&': {
@@ -28,7 +78,7 @@ export default function Editor({ content, onChange }) {
         <CodeMirror
           value={content}
           onChange={onChange}
-          extensions={[markdown(), customTheme, EditorView.lineWrapping]}
+          extensions={[markdown(), customTheme, EditorView.lineWrapping, smartPaste]}
           theme={oneDark}
           basicSetup={{
             lineNumbers: true,
